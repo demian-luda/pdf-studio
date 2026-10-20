@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QImage, QKeySequence
-from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QProgressDialog, QVBoxLayout,
                                QWidget)
 
@@ -21,10 +21,12 @@ from pdf_studio.core.fuentes import indice_incluidas, indice_sistema
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.paginas import RotarPagina
+from pdf_studio.core.texto import BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en, planificar
 from pdf_studio.dependencias.chequeo import chequear_fuentes, chequear_inicio
 from pdf_studio.ui.busqueda import BarraBusqueda
 from pdf_studio.ui.colocacion import ImagenColocable
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
+from pdf_studio.ui.edicion_texto import DialogoEditarTexto
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.panel_faltantes import PanelFaltantes
@@ -36,6 +38,8 @@ class VentanaPrincipal(QMainWindow):
         super().__init__()
         self.documento: Documento | None = None
         self.biblioteca = biblioteca if biblioteca is not None else BibliotecaFirmas()
+        self.bloque: BloqueTexto | None = None        # texto seleccionado en modo Editar texto
+        self._cache_fuentes: dict = {}
         self.setWindowTitle(NOMBRE_APP)
         self.resize(1280, 860)
         self.setAcceptDrops(True)
@@ -131,7 +135,11 @@ class VentanaPrincipal(QMainWindow):
                                                 self.accion_insertar_imagen)
         self.acc_firmas = self._accion("Firmas…", "Ctrl+Shift+F", self.mostrar_firmas,
                                        tip="Biblioteca de firmas: agregar, quitar fondo e insertar.")
-        for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota):
+        self.acc_modo_texto = self._accion("Editar texto", "Ctrl+Shift+E", lambda: self.set_modo(Modo.TEXTO), True,
+                                           "Clic en un texto para seleccionarlo; doble clic o F2 para editarlo; "
+                                           "arrastrá el marco para moverlo.")
+        self.acc_editar_seleccion = self._accion("Editar texto seleccionado…", "F2", self.editar_seleccion)
+        for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, self.acc_modo_texto):
             self.grupo_modo.addAction(a)
         self.acc_modo_mano.setChecked(True)
 
@@ -159,7 +167,8 @@ class VentanaPrincipal(QMainWindow):
             m.addSeparator() if a is None else m.addAction(a)
         m = self.menuBar().addMenu("&Editar")
         for a in (self.acc_deshacer, self.acc_rehacer, None, self.acc_rotar_der, self.acc_rotar_izq,
-                  None, self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, None,
+                  None, self.acc_modo_mano, self.acc_modo_texto, self.acc_editar_seleccion,
+                  self.acc_modo_resaltar, self.acc_modo_nota, None,
                   self.acc_firmas, self.acc_insertar_imagen):
             m.addSeparator() if a is None else m.addAction(a)
         m = self.menuBar().addMenu("&Ver")
@@ -178,9 +187,16 @@ class VentanaPrincipal(QMainWindow):
         for a in (self.acc_abrir, self.acc_guardar, None, self.acc_deshacer, self.acc_rehacer, None,
                   self.acc_alejar, self.acc_acercar, self.acc_ajustar_ancho, None,
                   self.acc_rotar_izq, self.acc_rotar_der, None,
-                  self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, None, self.acc_firmas,
-                  None, self.acc_buscar):
+                  self.acc_modo_mano, self.acc_modo_texto, None, self.acc_modo_resaltar, self.acc_modo_nota,
+                  None, self.acc_firmas, None, self.acc_buscar):
             barra.addSeparator() if a is None else barra.addAction(a)
+        self.combo_nivel = QComboBox(self)
+        self.combo_nivel.addItem("Fragmento", Nivel.FRAGMENTO)
+        self.combo_nivel.addItem("Línea", Nivel.LINEA)
+        self.combo_nivel.addItem("Párrafo", Nivel.PARRAFO)
+        self.combo_nivel.setCurrentIndex(1)
+        self.combo_nivel.setToolTip("Qué se selecciona al hacer clic en un texto")
+        barra.insertWidget(self.acc_modo_resaltar, self.combo_nivel)
 
     def _conectar(self) -> None:
         self.visor.pagina_actual_cambio.connect(self._pagina_cambio)
@@ -190,6 +206,9 @@ class VentanaPrincipal(QMainWindow):
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
         self.faltantes.rechequear.connect(self.chequear_dependencias)
+        self.visor.texto_clic.connect(self._texto_clic)
+        self.visor.texto_doble_clic.connect(self._texto_doble_clic)
+        self.visor.seleccion_movida.connect(self.mover_seleccion)
         self.visor.colocacion_confirmada.connect(self.aplicar_colocacion)
         self.visor.colocacion_cancelada.connect(self.cancelar_colocacion)
         self.panel_firmas.insertar.connect(self.insertar_firma)
@@ -226,6 +245,17 @@ class VentanaPrincipal(QMainWindow):
         if dialogo.exec() and dialogo.resultado is not None:
             return dialogo.resultado, dialogo.nombre.text()
         return None
+
+    def _dialogo_editar_texto(self, bloque: BloqueTexto) -> tuple[str, OpcionFuente] | None:
+        dialogo = DialogoEditarTexto(bloque, lambda texto: self._analizar(bloque, texto),
+                                     lambda: indice_sistema().cargar(), self)
+        if dialogo.exec() and dialogo.opcion_elegida() is not None:
+            return dialogo.texto, dialogo.opcion_elegida()
+        return None
+
+    def _confirmar_avisos(self, avisos: list[str]) -> bool:
+        return self._preguntar("Editar texto", "Antes de aplicar:\n\n• " + "\n• ".join(avisos)
+                               + "\n\n¿Aplicar igual?")
 
     def _pedir_texto_nota(self) -> str | None:
         valor, ok = QInputDialog.getMultiLineText(self, "Nueva nota", "Texto de la nota:")
@@ -414,7 +444,9 @@ class VentanaPrincipal(QMainWindow):
     def set_modo(self, modo: Modo) -> None:
         self.visor.set_modo(modo)
         {Modo.MANO: self.acc_modo_mano, Modo.RESALTAR: self.acc_modo_resaltar,
-         Modo.NOTA: self.acc_modo_nota}[modo].setChecked(True)
+         Modo.NOTA: self.acc_modo_nota, Modo.TEXTO: self.acc_modo_texto}[modo].setChecked(True)
+        if modo != Modo.TEXTO:
+            self.bloque = None
 
     def _resaltar_en(self, pagina: int, rect) -> None:
         if self.documento is None:
@@ -530,7 +562,74 @@ class VentanaPrincipal(QMainWindow):
         self.panel_firmas.set_colocando(False)
         self.statusBar().clearMessage()
 
+    # ------------------------------------------------------------------ edición de texto
+    @property
+    def nivel_texto(self) -> str:
+        return self.combo_nivel.currentData()
+
+    def _analizar(self, bloque: BloqueTexto, texto: str):
+        doc = self.documento.doc
+        return analizar_fuente(doc, doc[bloque.pagina], bloque.estilo, texto, indice_sistema(),
+                               indice_incluidas(), self._cache_fuentes)
+
+    def seleccionar_texto(self, pagina: int, punto) -> BloqueTexto | None:
+        if self.documento is None:
+            return None
+        bloque = bloque_en(self.documento.doc[pagina], pagina, punto, self.nivel_texto)
+        self.bloque = bloque
+        if bloque is None:
+            self.visor.limpiar_seleccion()
+            self.statusBar().showMessage("No hay texto editable en ese lugar.", 4000)
+            return None
+        self.visor.mostrar_seleccion(pagina, bloque.bbox)
+        resumen = bloque.texto if len(bloque.texto) < 60 else bloque.texto[:57] + "…"
+        self.statusBar().showMessage(f"Seleccionado: «{resumen}». Doble clic o F2 para editar; "
+                                     "arrastrá el marco para moverlo.")
+        return bloque
+
+    def _texto_clic(self, pagina: int, punto) -> None:
+        self.seleccionar_texto(pagina, punto)
+
+    def _texto_doble_clic(self, pagina: int, punto) -> None:
+        if self.seleccionar_texto(pagina, punto) is not None:
+            self.editar_seleccion()
+
+    def editar_seleccion(self) -> None:
+        bloque = self.bloque
+        if self.documento is None or bloque is None:
+            return
+        resultado = self._dialogo_editar_texto(bloque)
+        if resultado is None:
+            return
+        texto, opcion = resultado
+        self._aplicar_plan(bloque, texto, opcion, (0.0, 0.0))
+
+    def mover_seleccion(self, pagina: int, dx: float, dy: float) -> None:
+        bloque = self.bloque
+        if self.documento is None or bloque is None or bloque.pagina != pagina:
+            return
+        opcion = self._analizar(bloque, bloque.texto).recomendada
+        self._aplicar_plan(bloque, bloque.texto, opcion, (dx, dy))
+
+    def _aplicar_plan(self, bloque: BloqueTexto, texto: str, opcion: OpcionFuente | None,
+                      desplazamiento: tuple[float, float]) -> bool:
+        try:
+            plan = planificar(self.documento.doc, bloque, texto, opcion, desplazamiento, self._cache_fuentes)
+            if plan.avisos and not self._confirmar_avisos(plan.avisos):
+                self.visor.recargar()
+                return False
+            self.documento.ejecutar(plan.operacion)
+        except ErrorDocumento as e:
+            self._informar("Editar texto", str(e), error=True)
+            self.visor.recargar()
+            return False
+        self.bloque = None
+        self.statusBar().showMessage(plan.operacion.descripcion() + ": listo.", 5000)
+        return True
+
     def _documento_cambio(self) -> None:
+        self._cache_fuentes = {}
+        self.bloque = None
         self.visor.recargar()
         self.miniaturas.recargar()
         self.busqueda.rehacer_busqueda()
@@ -579,7 +678,7 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_rotar_der, self.acc_rotar_izq, self.acc_buscar, self.acc_acercar,
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
-                  self.acc_insertar_imagen):
+                  self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion):
             a.setEnabled(hay)
         self.acc_deshacer.setEnabled(hay and self.documento.puede_deshacer)
         self.acc_rehacer.setEnabled(hay and self.documento.puede_rehacer)

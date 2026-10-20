@@ -14,6 +14,11 @@ import pymupdf
 
 from pdf_studio.config import DPI_FIDELIDAD
 
+# En las páginas editadas, fuera de las zonas editadas, se toleran diferencias de hasta
+# 2/255 por canal: es lo que cambia el antialiasing cuando MuPDF compone una página que
+# pasó a tener transparencia (p. ej. una firma PNG). Las páginas NO editadas exigen 0.
+TOLERANCIA_ZONAS = 2
+
 # progreso(hechas, total) -> True para seguir, False para cancelar
 Progreso = Callable[[int, int], bool]
 
@@ -35,6 +40,7 @@ class DiferenciaPagina:
 class ResultadoFidelidad:
     dpi: int
     comparadas: list[int] = field(default_factory=list)   # páginas del resultado comparadas
+    parciales: list[int] = field(default_factory=list)    # editadas, comparadas fuera de las zonas editadas
     excluidas: list[int] = field(default_factory=list)    # páginas editadas (no se comparan)
     diferencias: list[DiferenciaPagina] = field(default_factory=list)
     completa: bool = True                                  # False si el usuario canceló
@@ -48,12 +54,24 @@ class ResultadoFidelidad:
             return (f"Verificación cancelada: se compararon {len(self.comparadas)} páginas; "
                     "el resto quedó sin verificar.")
         if self.diferencias:
-            paginas = ", ".join(str(d.pagina + 1) for d in self.diferencias)
-            return (f"¡Atención! Hay diferencias visuales en páginas que no se editaron: {paginas}.")
+            enteras = [d for d in self.diferencias if d.pagina not in self.parciales]
+            zonas = [d for d in self.diferencias if d.pagina in self.parciales]
+            partes = []
+            if enteras:
+                partes.append("¡Atención! Hay diferencias visuales en páginas que no se editaron: "
+                              + ", ".join(str(d.pagina + 1) for d in enteras) + ".")
+            if zonas:
+                partes.append("¡Atención! En páginas editadas cambió algo fuera de la zona editada: "
+                              + ", ".join(str(d.pagina + 1) for d in zonas) + ".")
+            return " ".join(partes)
         if not self.comparadas:
             return "No había páginas sin editar para comparar."
-        return (f"Fidelidad verificada: {len(self.comparadas)} páginas sin editar son idénticas "
-                f"al original (diferencia de píxeles = 0 a {self.dpi} dpi).")
+        texto = (f"Fidelidad verificada: {len(self.comparadas)} páginas sin editar son idénticas "
+                 f"al original (diferencia de píxeles = 0 a {self.dpi} dpi).")
+        if self.parciales:
+            texto += (f" En {len(self.parciales)} página(s) editada(s), todo lo que está fuera de "
+                      "las zonas editadas también es idéntico.")
+        return texto
 
 
 def _abrir(ruta: Path | str, contrasena: str | None) -> pymupdf.Document:
@@ -64,8 +82,10 @@ def _abrir(ruta: Path | str, contrasena: str | None) -> pymupdf.Document:
     return doc
 
 
-def comparar_paginas(pag_a: pymupdf.Page, pag_b: pymupdf.Page, dpi: int) -> tuple[int, int, str]:
-    """Devuelve (píxeles distintos, píxeles totales, motivo)."""
+def comparar_paginas(pag_a: pymupdf.Page, pag_b: pymupdf.Page, dpi: int,
+                     excluir: list[tuple] | None = None) -> tuple[int, int, str]:
+    """Devuelve (píxeles distintos, píxeles totales, motivo).
+    `excluir`: zonas (rects sin rotar, en puntos) que no se comparan."""
     pix_a = pag_a.get_pixmap(dpi=dpi, alpha=False, annots=True)
     pix_b = pag_b.get_pixmap(dpi=dpi, alpha=False, annots=True)
     total = pix_a.width * pix_a.height
@@ -75,8 +95,20 @@ def comparar_paginas(pag_a: pymupdf.Page, pag_b: pymupdf.Page, dpi: int) -> tupl
         return 0, total, ""
     a = np.frombuffer(pix_a.samples_mv, dtype=np.uint8).reshape(pix_a.height, pix_a.width, pix_a.n)
     b = np.frombuffer(pix_b.samples_mv, dtype=np.uint8).reshape(pix_b.height, pix_b.width, pix_b.n)
-    distintos = int(np.any(a != b, axis=2).sum())
-    return distintos, total, "cambió el contenido visible"
+    if excluir:
+        mascara = np.any(np.abs(a.astype(np.int16) - b.astype(np.int16)) > TOLERANCIA_ZONAS, axis=2)
+    else:
+        mascara = np.any(a != b, axis=2)
+    if excluir:
+        escala = pymupdf.Matrix(dpi / 72, dpi / 72)
+        for r in excluir:
+            z = (pymupdf.Rect(r) * pag_b.rotation_matrix * escala).irect
+            y0, y1 = max(0, z.y0 - 2), min(pix_a.height, z.y1 + 2)
+            x0, x1 = max(0, z.x0 - 2), min(pix_a.width, z.x1 + 2)
+            mascara[y0:y1, x0:x1] = False
+    distintos = int(mascara.sum())
+    return distintos, total, ("cambió el contenido fuera de la zona editada" if excluir
+                              else "cambió el contenido visible")
 
 
 def comparar_documentos(
@@ -86,11 +118,14 @@ def comparar_documentos(
     dpi: int = DPI_FIDELIDAD,
     contrasena: str | None = None,
     progreso: Progreso | None = None,
+    parciales: dict[int, tuple[int, list[tuple]]] | None = None,
 ) -> ResultadoFidelidad:
     """Compara páginas del resultado contra el original.
 
     mapa: {índice en resultado: índice en original} con las páginas que NO se
     editaron. Si es None se comparan todas, una a una.
+    parciales: {índice en resultado: (índice en original, zonas editadas)} para páginas
+    editadas que se comparan fuera de esas zonas.
     """
     original = _abrir(ruta_original, contrasena)
     resultado = _abrir(ruta_resultado, contrasena)
@@ -99,13 +134,16 @@ def comparar_documentos(
             mapa = {i: i for i in range(min(original.page_count, resultado.page_count))}
         res = ResultadoFidelidad(dpi=dpi)
         res.excluidas = [i for i in range(resultado.page_count) if i not in mapa]
-        pares = sorted(mapa.items())
-        for n, (i_res, i_orig) in enumerate(pares):
+        parciales = parciales or {}
+        pares = [(i_res, i_orig, None) for i_res, i_orig in sorted(mapa.items())]
+        pares += [(i_res, i_orig, zonas) for i_res, (i_orig, zonas) in sorted(parciales.items())
+                  if i_res < resultado.page_count and i_orig < original.page_count]
+        for n, (i_res, i_orig, zonas) in enumerate(pares):
             if progreso is not None and not progreso(n, len(pares)):
                 res.completa = False
                 break
-            distintos, total, motivo = comparar_paginas(original[i_orig], resultado[i_res], dpi)
-            res.comparadas.append(i_res)
+            distintos, total, motivo = comparar_paginas(original[i_orig], resultado[i_res], dpi, zonas)
+            (res.comparadas if zonas is None else res.parciales).append(i_res)
             if distintos:
                 res.diferencias.append(DiferenciaPagina(i_res, i_orig, distintos, total, motivo))
         if progreso is not None and res.completa:

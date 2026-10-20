@@ -95,7 +95,8 @@ def _comando_desde_lista(titulo: str, obtener_archivos: str) -> str:
 
 def comando_google_fonts(carpeta: str, licencia: str, titulo: str) -> str:
     api = f"https://api.github.com/repos/google/fonts/contents/{licencia}/{carpeta}"
-    obtener = (f"$archivos = Invoke-RestMethod -Uri '{api}' | "
+    # Entre paréntesis: PowerShell 5.1 no enumera el arreglo JSON en el pipeline
+    obtener = (f"$archivos = (Invoke-RestMethod -Uri '{api}') | "
                "Where-Object { $_.name -like '*.ttf' -or $_.name -like '*.otf' }")
     return _comando_desde_lista(titulo, obtener)
 

@@ -233,6 +233,9 @@ class InsertarImagen(Operacion):
     def paginas_afectadas(self) -> set[int]:
         return {self.pagina}
 
+    def regiones_afectadas(self) -> dict[int, list[tuple]]:
+        return {self.pagina: [tuple(self.caja() + (-1, -1, 1, 1))]}
+
     def descripcion(self) -> str:
         return f"Insertar {self._descripcion} en página {self.pagina + 1}"
 

@@ -10,6 +10,7 @@ la página recibe su propia copia de los diccionarios compartidos.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 import pymupdf
@@ -47,6 +48,83 @@ def _contenedor_recursos(doc: pymupdf.Document, xref_pagina: int) -> tuple[int, 
     if tipo == "dict":
         return xref_pagina, "Resources/"
     return None
+
+
+# ---------------------------------------------------------------------- objetos PDF como texto
+class Ref(int):
+    """Referencia indirecta 'N 0 R'."""
+
+
+class Nombre(str):
+    """Nombre PDF, sin la barra inicial."""
+
+
+_TOKEN = re.compile(rb"""
+    (?P<ref>\d+\s+\d+\s+R)
+  | (?P<dict_ini><<) | (?P<dict_fin>>>)
+  | (?P<arr_ini>\[) | (?P<arr_fin>\])
+  | (?P<nombre>/[^\s/<>\[\]()%{}]*)
+  | (?P<hex><[0-9A-Fa-f\s]*>)
+  | (?P<cadena>\((?:\\.|[^\\()])*\))
+  | (?P<otro>[^\s/<>\[\]()%{}]+)
+""", re.X | re.S)
+
+
+def parsear_objeto(texto: str):
+    """Convierte el texto de un objeto PDF (diccionarios, arreglos, nombres, refs) en
+    estructuras de Python. Las cadenas y números quedan como texto crudo."""
+    tokens = [m for m in _TOKEN.finditer(texto.encode("latin-1"))]
+    pos = 0
+
+    def valor():
+        nonlocal pos
+        m = tokens[pos]
+        pos += 1
+        tipo = m.lastgroup
+        crudo = m.group(0).decode("latin-1")
+        if tipo == "ref":
+            return Ref(int(crudo.split()[0]))
+        if tipo == "nombre":
+            return Nombre(crudo[1:])
+        if tipo == "dict_ini":
+            d = {}
+            while tokens[pos].lastgroup != "dict_fin":
+                clave = valor()
+                d[str(clave)] = valor()
+            pos += 1
+            return d
+        if tipo == "arr_ini":
+            lista = []
+            while tokens[pos].lastgroup != "arr_fin":
+                lista.append(valor())
+            pos += 1
+            return lista
+        return crudo
+
+    return valor()
+
+
+def serializar_objeto(v) -> str:
+    if isinstance(v, Ref):
+        return f"{int(v)} 0 R"
+    if isinstance(v, Nombre):
+        return "/" + v
+    if isinstance(v, dict):
+        return "<<" + "".join(f"/{k} {serializar_objeto(x)}" for k, x in v.items()) + ">>"
+    if isinstance(v, list):
+        return "[" + " ".join(serializar_objeto(x) for x in v) + "]"
+    return str(v)
+
+
+def traducir_refs(v, mapa: dict[int, int]):
+    """Cambia cada referencia según `mapa`. Lanza KeyError si aparece una desconocida."""
+    if isinstance(v, Ref):
+        return Ref(mapa[int(v)])
+    if isinstance(v, dict):
+        return {k: traducir_refs(x, mapa) for k, x in v.items()}
+    if isinstance(v, list):
+        return [traducir_refs(x, mapa) for x in v]
+    return v
 
 
 def _copiar_objeto(doc: pymupdf.Document, xref: int) -> int:

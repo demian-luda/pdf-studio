@@ -60,6 +60,12 @@ class Operacion:
         afectadas = self.paginas_afectadas()
         return {k: v for k, v in mapa.items() if k not in afectadas}
 
+    def regiones_afectadas(self) -> dict[int, list[tuple]] | None:
+        """Zonas (rects sin rotar) que la operación puede haber cambiado en cada página.
+        Si las declara, la verificación de fidelidad compara el resto de esas páginas.
+        None = la página entera puede cambiar."""
+        return None
+
     def descripcion(self) -> str:
         return self.nombre
 
@@ -225,6 +231,20 @@ class Documento:
     def paginas_editadas(self) -> set[int]:
         return set(range(self.doc.page_count)) - set(self.mapa_paginas())
 
+    def regiones_editadas(self) -> dict[int, list[tuple]]:
+        """{página: zonas editadas} para las páginas donde TODAS las operaciones declararon
+        sus zonas. El resto de esas páginas debe quedar idéntico al original."""
+        regiones: dict[int, list[tuple]] = {}
+        completas: set[int] = set()
+        for op in self.operaciones_activas:
+            r = op.regiones_afectadas()
+            for p in op.paginas_afectadas():
+                if r is None or p not in r:
+                    completas.add(p)
+                else:
+                    regiones.setdefault(p, []).extend(r[p])
+        return {p: v for p, v in regiones.items() if p not in completas}
+
     # ------------------------------------------------------------------ guardado
     def ruta_sugerida(self) -> Path:
         return self.ruta_original.with_name(f"{self.ruta_original.stem}_editado.pdf")
@@ -261,8 +281,11 @@ class Documento:
         estructura_ok, error = _verificar_estructura(salida, self._contrasena)
         if error:
             avisos.append(f"Detalle de estructura: {error}")
+        parciales = {p: (p, zonas) for p, zonas in self.regiones_editadas().items()
+                     if p < self.paginas_original}
         fidelidad = comparar_documentos(self._base, salida, self.mapa_paginas(),
-                                        contrasena=self._contrasena, progreso=progreso)
+                                        contrasena=self._contrasena, progreso=progreso,
+                                        parciales=parciales)
         return Guardado(salida, incremental, intactos, estructura_ok, fidelidad, avisos)
 
     def confirmar_guardado(self, guardado: Guardado, destino: str | Path,

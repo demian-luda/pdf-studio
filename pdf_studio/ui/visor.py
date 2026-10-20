@@ -29,11 +29,25 @@ class Modo(Enum):
     MANO = "mano"
     RESALTAR = "resaltar"
     NOTA = "nota"
+    TEXTO = "texto"
 
 
 def pixmap_a_qimage(pix: pymupdf.Pixmap) -> QImage:
     formato = QImage.Format.Format_RGB888 if pix.n == 3 else QImage.Format.Format_RGBA8888
     return QImage(pix.samples, pix.width, pix.height, pix.stride, formato).copy()
+
+
+class SeleccionTexto(QGraphicsRectItem):
+    """Marco del texto seleccionado. Se puede arrastrar para mover el texto."""
+
+    def __init__(self, rect: QRectF, pagina: int):
+        super().__init__(rect)
+        self.pagina = pagina
+        self.setPen(QPen(QColor(0, 120, 215), 0, Qt.PenStyle.DashLine))
+        self.setBrush(QBrush(QColor(0, 120, 215, 35)))
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setZValue(40)
 
 
 class ItemPagina(QGraphicsItem):
@@ -63,6 +77,9 @@ class Visor(QGraphicsView):
     punto_clic = Signal(int, object)          # (página, pymupdf.Point sin rotar)
     colocacion_confirmada = Signal()          # Enter mientras se ubica una imagen
     colocacion_cancelada = Signal()           # Esc mientras se ubica una imagen
+    texto_clic = Signal(int, object)          # (página, punto sin rotar) en modo Editar texto
+    texto_doble_clic = Signal(int, object)
+    seleccion_movida = Signal(int, float, float)   # (página, dx, dy) en coordenadas sin rotar
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -85,6 +102,8 @@ class Visor(QGraphicsView):
         self._inicio_seleccion: QPointF | None = None
         self._rect_seleccion: QGraphicsRectItem | None = None
         self.colocacion: ImagenColocable | None = None
+        self.seleccion: SeleccionTexto | None = None
+        self._pos_seleccion: QPointF | None = None
         self.verticalScrollBar().valueChanged.connect(self._actualizar_pagina_actual)
         self.set_modo(Modo.MANO)
 
@@ -113,6 +132,7 @@ class Visor(QGraphicsView):
         self.items = []
         self._marcas = []
         self._rect_seleccion = None
+        self.seleccion = None      # el documento cambió: la selección de texto ya no vale
         if self.documento is None:
             escena.setSceneRect(QRectF())
             return
@@ -331,6 +351,17 @@ class Visor(QGraphicsView):
             self.scene().addItem(marca)
             self._marcas.append(marca)
 
+    # ------------------------------------------------------------------ selección de texto
+    def mostrar_seleccion(self, pagina: int, rect: pymupdf.Rect) -> None:
+        self.limpiar_seleccion()
+        self.seleccion = SeleccionTexto(self.a_escena(pagina, rect).adjusted(-1, -1, 1, 1), pagina)
+        self.scene().addItem(self.seleccion)
+
+    def limpiar_seleccion(self) -> None:
+        if self.seleccion is not None and self.seleccion.scene() is not None:
+            self.scene().removeItem(self.seleccion)
+        self.seleccion = None
+
     # ------------------------------------------------------------------ colocación de imágenes
     def iniciar_colocacion(self, item: ImagenColocable, pagina: int | None = None) -> None:
         """Muestra la imagen flotante centrada en la parte visible de la página."""
@@ -394,8 +425,11 @@ class Visor(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            cursor = Qt.CursorShape.IBeamCursor if modo == Modo.RESALTAR else Qt.CursorShape.PointingHandCursor
+            cursor = (Qt.CursorShape.IBeamCursor if modo in (Modo.RESALTAR, Modo.TEXTO)
+                      else Qt.CursorShape.PointingHandCursor)
             self.viewport().setCursor(cursor)
+        if modo != Modo.TEXTO:
+            self.limpiar_seleccion()
 
     def mousePressEvent(self, evento) -> None:
         if self._modo == Modo.RESALTAR and evento.button() == Qt.MouseButton.LeftButton:
@@ -405,6 +439,18 @@ class Visor(QGraphicsView):
             self._rect_seleccion.setBrush(QBrush(QColor(0, 120, 215, 40)))
             self._rect_seleccion.setZValue(20)
             self.scene().addItem(self._rect_seleccion)
+            return
+        if self._modo == Modo.TEXTO and evento.button() == Qt.MouseButton.LeftButton:
+            escena = self.mapToScene(evento.position().toPoint())
+            if self.seleccion is not None and self.seleccion.sceneBoundingRect().contains(escena):
+                self._pos_seleccion = self.seleccion.pos()
+                super().mousePressEvent(evento)   # arrastre del marco
+                return
+            destino = self.desde_escena(escena)
+            if destino is not None:
+                self.texto_clic.emit(*destino)
+            else:
+                self.limpiar_seleccion()
             return
         if self._modo == Modo.NOTA and evento.button() == Qt.MouseButton.LeftButton:
             destino = self.desde_escena(self.mapToScene(evento.position().toPoint()))
@@ -420,7 +466,25 @@ class Visor(QGraphicsView):
             return
         super().mouseMoveEvent(evento)
 
+    def mouseDoubleClickEvent(self, evento) -> None:
+        if self._modo == Modo.TEXTO:
+            destino = self.desde_escena(self.mapToScene(evento.position().toPoint()))
+            if destino is not None:
+                self.texto_doble_clic.emit(*destino)
+            return
+        super().mouseDoubleClickEvent(evento)
+
     def mouseReleaseEvent(self, evento) -> None:
+        if self._pos_seleccion is not None and self.seleccion is not None:
+            super().mouseReleaseEvent(evento)
+            inicio, fin = self._pos_seleccion, self.seleccion.pos()
+            self._pos_seleccion = None
+            if (fin - inicio).manhattanLength() > 0.5:
+                pagina = self.seleccion.pagina
+                a = self.escena_a_pagina(pagina, self.items[pagina].mapToScene(QPointF(0, 0)) + inicio)
+                b = self.escena_a_pagina(pagina, self.items[pagina].mapToScene(QPointF(0, 0)) + fin)
+                self.seleccion_movida.emit(pagina, b.x - a.x, b.y - a.y)
+            return
         if self._rect_seleccion is not None and self._inicio_seleccion is not None:
             rect = self._rect_seleccion.rect()
             self.scene().removeItem(self._rect_seleccion)

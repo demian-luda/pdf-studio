@@ -132,3 +132,33 @@ def test_comandos_son_powershell_valido():
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                            input=c, capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f"Comando inválido:\n{c}\n{r.stdout}{r.stderr}"
+
+
+def _ejecutar_descarga_sin_instalar(comando: str, destino) -> list[str]:
+    """Corre el comando real cambiando el destino y sin tocar el registro."""
+    prueba = comando.replace('$destino = "$env:LOCALAPPDATA\\Microsoft\\Windows\\Fonts"', f"$destino = '{destino}'")
+    prueba = "\n".join(l for l in prueba.splitlines() if "New-ItemProperty" not in l)
+    assert "LOCALAPPDATA" not in prueba and "HKCU" not in prueba
+    script = destino.parent / "descarga.ps1"
+    script.write_text(prueba, encoding="utf-8-sig")
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                        "-File", str(script)], capture_output=True, text=True, timeout=240)
+    assert r.returncode == 0, r.stderr
+    return sorted(p.name for p in destino.iterdir())
+
+
+@pytest.mark.red
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Requiere PowerShell")
+def test_descarga_real_google_fonts(tmp_path):
+    (tmp_path / "f").mkdir()
+    archivos = _ejecutar_descarga_sin_instalar(buscar_libre("Carlito-Bold").comando, tmp_path / "f")
+    assert archivos == ["Carlito-Bold.ttf", "Carlito-BoldItalic.ttf", "Carlito-Italic.ttf", "Carlito-Regular.ttf"]
+
+
+@pytest.mark.red
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Requiere PowerShell")
+def test_descarga_real_liberation(tmp_path):
+    (tmp_path / "f").mkdir()
+    archivos = _ejecutar_descarga_sin_instalar(comando_liberation("Serif"), tmp_path / "f")
+    assert archivos == ["LiberationSerif-Bold.ttf", "LiberationSerif-BoldItalic.ttf",
+                        "LiberationSerif-Italic.ttf", "LiberationSerif-Regular.ttf"]
