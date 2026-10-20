@@ -68,11 +68,14 @@ class PanelMiniaturas(QListWidget):
             i = self._pendientes.pop(0)
             if i >= self.count():
                 continue
-            pag = self.documento.doc[i]
-            tam = self.iconSize()
-            escala = min(tam.width() / pag.rect.width, tam.height() / pag.rect.height)
-            pix = pag.get_pixmap(matrix=pymupdf.Matrix(escala, escala), alpha=False, annots=True)
-            img = QPixmap.fromImage(pixmap_a_qimage(pix))
+            try:
+                pag = self.documento.doc[i]
+                tam = self.iconSize()
+                escala = min(tam.width() / pag.rect.width, tam.height() / pag.rect.height)
+                pix = pag.get_pixmap(matrix=pymupdf.Matrix(escala, escala), alpha=False, annots=True)
+                img = QPixmap.fromImage(pixmap_a_qimage(pix))
+            except Exception:
+                continue          # página dañada: queda la miniatura en blanco
             # Borde fino para que la miniatura se distinga del fondo
             pintor = QPainter(img)
             pintor.setPen(QColor(0, 0, 0, 80))

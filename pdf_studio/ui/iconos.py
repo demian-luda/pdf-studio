@@ -42,11 +42,13 @@ def _pixmap(nombre: str, color: str, lado: int, dpr: float = 2.0) -> QPixmap:
     return px
 
 
-def crear_icono(nombre: str, paleta: Paleta | None = None) -> QIcon:
+def crear_icono(nombre: str, paleta: Paleta | None = None, primario: bool = False) -> QIcon:
+    """`primario`: el ícono va sobre el color de acento (botón principal) y usa su color de texto."""
     p = paleta or gestor().paleta
+    normal = p.sobre_acento if primario else p.texto
     icono = QIcon()
     for lado in TAMANOS:
-        icono.addPixmap(_pixmap(nombre, p.texto, lado), QIcon.Mode.Normal, QIcon.State.Off)
+        icono.addPixmap(_pixmap(nombre, normal, lado), QIcon.Mode.Normal, QIcon.State.Off)
         icono.addPixmap(_pixmap(nombre, p.acento, lado), QIcon.Mode.Normal, QIcon.State.On)
         icono.addPixmap(_pixmap(nombre, p.texto_suave, lado), QIcon.Mode.Disabled, QIcon.State.Off)
         icono.addPixmap(_pixmap(nombre, p.texto_suave, lado), QIcon.Mode.Disabled, QIcon.State.On)
@@ -57,10 +59,18 @@ def crear_icono(nombre: str, paleta: Paleta | None = None) -> QIcon:
 _registrados: "weakref.WeakKeyDictionary[object, str]" = weakref.WeakKeyDictionary()
 
 
+def _es_primario(objeto) -> bool:
+    try:
+        return bool(objeto.property("primario"))
+    except (AttributeError, RuntimeError):
+        return False
+
+
 def asignar(objeto, nombre: str) -> None:
-    """objeto: QAction o QAbstractButton."""
+    """objeto: QAction o QAbstractButton. En botones primarios el ícono toma el color del texto
+    sobre el acento (si no, quedaría oscuro sobre azul)."""
     _registrados[objeto] = nombre
-    objeto.setIcon(crear_icono(nombre))
+    objeto.setIcon(crear_icono(nombre, primario=_es_primario(objeto)))
 
 
 def nombre_de(objeto) -> str | None:
@@ -70,6 +80,6 @@ def nombre_de(objeto) -> str | None:
 def refrescar() -> None:
     for objeto, nombre in list(_registrados.items()):
         try:
-            objeto.setIcon(crear_icono(nombre))
+            objeto.setIcon(crear_icono(nombre, primario=_es_primario(objeto)))
         except RuntimeError:
             pass  # el objeto de Qt ya se destruyó

@@ -15,3 +15,4 @@ dist/
 # PDFs: solo se versionan los de ejemplo de tests/pdfs_prueba (sin datos reales)
 *.pdf
 !tests/pdfs_prueba/*.pdf
+!tests/pdfs_prueba/fuentes/*.pdf

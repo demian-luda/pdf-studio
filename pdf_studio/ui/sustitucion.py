@@ -44,7 +44,7 @@ class DialogoSustitucion(QDialog):
         self.combos: list[QComboBox] = []
         for fila, (fam, cands) in enumerate(zip(self.familias, self.opciones)):
             check = QCheckBox(self.tabla)
-            privada = bool(fam.embebidos & {Embebido.SUBCONJUNTO, Embebido.NO_EMBEBIDA})
+            privada = bool(fam.embebidos & {Embebido.SUBCONJUNTO, Embebido.NO_EMBEBIDA, Embebido.NO_ANALIZADA})
             # Por defecto se marcan las privadas o recortadas (salvo las 14 estándar de PDF)
             estandar = fam.clave in ("helvetica", "times", "courier", "symbol", "zapfdingbats")
             check.setChecked(fam.clave == preseleccion if preseleccion else (privada and not estandar))

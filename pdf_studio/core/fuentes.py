@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
+import threading
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -16,6 +18,9 @@ from pathlib import Path
 import pymupdf
 
 from pdf_studio import config
+
+# fontTools avisa por cada detalle menor de las fuentes (fechas raras, tablas extra): no interesa
+logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 _PREFIJO_SUBCONJUNTO = re.compile(r"^[A-Z]{6}\+")
 
@@ -51,6 +56,7 @@ class Embebido(str, Enum):
     SUBCONJUNTO = "subconjunto"
     NO_EMBEBIDA = "no_embebida"
     TYPE3 = "type3"           # glifos dibujados dentro del PDF; no hay archivo de fuente
+    NO_ANALIZADA = "no_analizada"   # embebida, pero su programa de fuente no se pudo leer
 
     @property
     def texto(self) -> str:
@@ -59,7 +65,13 @@ class Embebido(str, Enum):
             "subconjunto": "Embebida como subconjunto (recortada)",
             "no_embebida": "No embebida",
             "type3": "Type 3 (dibujada en el PDF)",
+            "no_analizada": "Embebida (no se pudo analizar)",
         }[self.value]
+
+    @property
+    def solo_letras_usadas(self) -> bool:
+        """Si para escribir texto nuevo solo se puede contar con las letras ya usadas."""
+        return self in (Embebido.SUBCONJUNTO, Embebido.TYPE3, Embebido.NO_ANALIZADA)
 
 
 def _normalizar(texto: str) -> str:
@@ -167,8 +179,17 @@ class IndiceFuentesSistema:
         self._por_clave: dict[str, FuenteSistema] = {}
         self._por_familia: dict[str, list[FuenteSistema]] = {}
         self._cargado = False
+        self._candado = threading.RLock()
+
+    @property
+    def cargado(self) -> bool:
+        return self._cargado
 
     def cargar(self) -> None:
+        with self._candado:
+            self._cargar()
+
+    def _cargar(self) -> None:
         from fontTools.ttLib import TTCollection, TTFont
 
         cache = self._leer_cache()
@@ -239,14 +260,16 @@ class IndiceFuentesSistema:
 
     def buscar(self, nombre_pdf: str) -> FuenteSistema | None:
         """Busca la fuente instalada que corresponde a un nombre de fuente del PDF."""
-        if not self._cargado:
-            self.cargar()
-        return self._por_clave.get(clave_fuente(nombre_pdf))
+        with self._candado:
+            if not self._cargado:
+                self._cargar()
+            return self._por_clave.get(clave_fuente(nombre_pdf))
 
     def familia(self, nombre: str) -> list[FuenteSistema]:
-        if not self._cargado:
-            self.cargar()
-        return list(self._por_familia.get(_normalizar(nombre), []))
+        with self._candado:
+            if not self._cargado:
+                self._cargar()
+            return list(self._por_familia.get(_normalizar(nombre), []))
 
 
 _indice_global: IndiceFuentesSistema | None = None
@@ -283,6 +306,7 @@ class InfoFuente:
     paginas: list[int] = field(default_factory=list)   # índices desde 0
     instalada: FuenteSistema | None = None    # instalada en Windows
     incluida: FuenteSistema | None = None     # viene con PDF Studio
+    error: str = ""                           # por qué no se pudo analizar (tipo de error)
 
     @property
     def es_estandar(self) -> bool:
@@ -296,6 +320,15 @@ class InfoFuente:
         d = asdict(self)
         d["embebido"] = self.embebido.value
         return d
+
+    @classmethod
+    def desde_dict(cls, d: dict) -> "InfoFuente":
+        d = dict(d)
+        d["embebido"] = Embebido(d["embebido"])
+        for clave in ("instalada", "incluida"):
+            if d.get(clave):
+                d[clave] = FuenteSistema(**d[clave])
+        return cls(**d)
 
 
 def clasificar_embebido(nombre: str, tipo: str, extension: str) -> Embebido:
@@ -317,36 +350,71 @@ def _programa_vacio(programa: list) -> bool:
     return all(not isinstance(x, str) or x == "endchar" for x in programa)
 
 
-def letras_con_glifo(datos: bytes) -> tuple[set[str] | None, int]:
+def _verificador_de_contorno(f):
+    """Función gid -> bool que dice si el glifo tiene trazos (None si no hay glifos legibles)."""
+    orden = f.getGlyphOrder()
+    if "glyf" in f:
+        glyf = f["glyf"]
+
+        def tiene(gid: int) -> bool:
+            return 0 <= gid < len(orden) and glyf[orden[gid]].numberOfContours != 0
+        return tiene
+    if "CFF " in f:
+        charstrings = f["CFF "].cff.topDictIndex[0].CharStrings
+
+        def tiene(gid: int) -> bool:
+            if not 0 <= gid < len(orden) or orden[gid] not in charstrings:
+                return False
+            cs = charstrings[orden[gid]]
+            cs.decompile()
+            return not _programa_vacio(cs.program)
+        return tiene
+    return None
+
+
+def letras_con_glifo(datos: bytes, unicode_a_codigo: dict[str, int] | None = None,
+                     codigo_a_gid=None) -> tuple[set[str] | None, int]:
     """(letras básicas que tienen un glifo con contorno real, cantidad total de glifos).
-    Las letras son None si el programa de fuente no trae un cmap usable."""
+
+    Primero se usa el cmap del programa de fuente. Muchos subconjuntos (sobre todo
+    TrueType CID) no traen cmap: en ese caso, si se pasan los mapas del PDF
+    (ToUnicode y CIDToGIDMap), se llega al glifo por ese camino. Las letras son
+    None si no hay forma de saber qué glifo es cada letra."""
     from fontTools.ttLib import TTFont
     try:
         f = TTFont(io.BytesIO(datos), lazy=True)
-        total = f["maxp"].numGlyphs
+        orden = f.getGlyphOrder()
+        total = f["maxp"].numGlyphs if "maxp" in f else len(orden)
     except Exception:
         return _letras_cff(datos)
-    cmap = f.getBestCmap()
-    if not cmap:
+    tiene = _verificador_de_contorno(f)
+    if tiene is None:
         return None, total
+    cmap = None
+    if "cmap" in f:
+        try:
+            cmap = f.getBestCmap()
+        except Exception:
+            cmap = None
     presentes: set[str] = set()
-    if "glyf" in f:
-        glyf = f["glyf"]
+    if cmap:
         for ch in LETRAS_BASICAS:
             nombre = cmap.get(ord(ch))
-            if nombre and nombre in glyf and glyf[nombre].numberOfContours != 0:
+            if nombre is not None:
+                try:
+                    if tiene(f.getGlyphID(nombre)):
+                        presentes.add(ch)
+                except Exception:
+                    pass
+        return presentes, total
+    if unicode_a_codigo and codigo_a_gid is not None:
+        for ch in LETRAS_BASICAS:
+            codigo = unicode_a_codigo.get(ch)
+            gid = codigo_a_gid(codigo) if codigo is not None else None
+            if gid is not None and tiene(gid):
                 presentes.add(ch)
-    elif "CFF " in f:
-        charstrings = f["CFF "].cff.topDictIndex[0].CharStrings
-        for ch in LETRAS_BASICAS:
-            nombre = cmap.get(ord(ch))
-            if nombre and nombre in charstrings:
-                cs = charstrings[nombre]
-                cs.decompile()
-                if not _programa_vacio(cs.program):
-                    presentes.add(ch)
-    return presentes, total
-
+        return presentes, total
+    return None, total
 
 def _letras_cff(datos: bytes) -> tuple[set[str] | None, int]:
     """Lo mismo para un CFF "pelado" (FontFile3): se usan los nombres de glifo."""
@@ -365,38 +433,92 @@ def _letras_cff(datos: bytes) -> tuple[set[str] | None, int]:
     for ch in LETRAS_BASICAS:
         nombre = agl.UV2AGL.get(ord(ch))
         if nombre in nombres:
-            cs = charstrings[nombre]
-            cs.decompile()
-            if not _programa_vacio(cs.program):
-                presentes.add(ch)
+            try:
+                cs = charstrings[nombre]
+                cs.decompile()
+                if not _programa_vacio(cs.program):
+                    presentes.add(ch)
+            except Exception:
+                pass
     return presentes, len(nombres)
 
 
-def es_subconjunto_por_cobertura(datos: bytes) -> bool | None:
+def es_subconjunto_por_cobertura(datos: bytes, unicode_a_codigo: dict[str, int] | None = None,
+                                 codigo_a_gid=None) -> bool | None:
     """True si al programa de fuente le faltan letras básicas (está recortado aunque no
     tenga el prefijo ABCDEF+). None si no se puede saber."""
-    letras, total = letras_con_glifo(datos)
+    letras, total = letras_con_glifo(datos, unicode_a_codigo, codigo_a_gid)
     if letras is None:
+        if not total:
+            total = _glifos_segun_pymupdf(datos)
         return (total < 150) if total else None
     if not letras and total >= 200:
         return False          # fuente de símbolos o de otro alfabeto, completa
     return len(letras) < len(LETRAS_BASICAS)
 
 
+def _glifos_segun_pymupdf(datos: bytes) -> int:
+    """Último recurso: cuántos glifos tiene la fuente según MuPDF (sirve para Type1 y CFF raros)."""
+    try:
+        return pymupdf.Font(fontbuffer=datos).glyph_count
+    except Exception:
+        return 0
+
+
+def _mapas_del_pdf(doc: pymupdf.Document, xref: int, tipo: str):
+    """(unicode -> código, código -> gid) a partir del /ToUnicode y del /CIDToGIDMap."""
+    from pdf_studio.core.codificacion import parsear_tounicode
+    t, v = doc.xref_get_key(xref, "ToUnicode")
+    if t != "xref":
+        return None, None
+    mapa, _ = parsear_tounicode(doc.xref_stream(int(v.split()[0])) or b"")
+    inverso: dict[str, int] = {}
+    for codigo, texto in sorted(mapa.items()):
+        if len(texto) == 1 and texto not in inverso:
+            inverso[texto] = codigo
+    if tipo != "Type0":
+        return inverso, None          # fuente simple sin cmap: el código no dice qué glifo es
+    t, v = doc.xref_get_key(xref, "DescendantFonts")
+    m = re.search(r"(\d+)\s+0\s+R", v if t == "array" else doc.xref_object(int(v.split()[0])) if t == "xref" else "")
+    if not m:
+        return inverso, None
+    desc = int(m.group(1))
+    t, v = doc.xref_get_key(desc, "CIDToGIDMap")
+    if t == "xref":
+        tabla = doc.xref_stream(int(v.split()[0])) or b""
+
+        def codigo_a_gid(cid: int) -> int | None:
+            if 2 * cid + 1 < len(tabla):
+                return tabla[2 * cid] << 8 | tabla[2 * cid + 1]
+            return None
+        return inverso, codigo_a_gid
+    return inverso, (lambda cid: cid)       # Identity (o ausente): CID = número de glifo
+
+
 def clasificar_fuente(doc: pymupdf.Document, xref: int, nombre: str, tipo: str, extension: str) -> Embebido:
     """Como clasificar_embebido, pero mirando la cobertura real de glifos: una fuente
-    embebida sin prefijo a la que le faltan letras es un subconjunto."""
+    embebida sin prefijo a la que le faltan letras es un subconjunto.
+    Nunca lanza excepciones: si no se puede leer, devuelve NO_ANALIZADA."""
     base = clasificar_embebido(nombre, tipo, extension)
     if base != Embebido.COMPLETA:
         return base
     try:
         datos = doc.extract_font(xref)[3]
     except Exception:
-        datos = b""
-    if datos and es_subconjunto_por_cobertura(datos):
-        return Embebido.SUBCONJUNTO
-    return base
-
+        return Embebido.NO_ANALIZADA
+    if not datos:
+        return Embebido.NO_ANALIZADA
+    try:
+        inverso, a_gid = _mapas_del_pdf(doc, xref, tipo)
+    except Exception:
+        inverso, a_gid = None, None
+    try:
+        recortada = es_subconjunto_por_cobertura(datos, inverso, a_gid)
+    except Exception:
+        recortada = None
+    if recortada is None:
+        return Embebido.NO_ANALIZADA
+    return Embebido.SUBCONJUNTO if recortada else Embebido.COMPLETA
 
 # ---------------------------------------------------------------------- clase tipográfica
 class Clase:
@@ -464,17 +586,25 @@ def analizar_fuentes(doc: pymupdf.Document,
                      incluidas: IndiceFuentesSistema | None = None) -> list[InfoFuente]:
     """Lista las fuentes del documento, agrupadas por nombre y tipo de embebido."""
     grupos: dict[tuple[str, Embebido], InfoFuente] = {}
-    clasificadas: dict[int, Embebido] = {}
+    clasificadas: dict[int, tuple[Embebido, str]] = {}
     for pno in range(doc.page_count):
-        for xref, ext, tipo, basefont, _ref, _enc in doc.get_page_fonts(pno):
+        try:
+            fuentes_pagina = doc.get_page_fonts(pno)
+        except Exception:
+            continue          # página dañada: el resto se analiza igual
+        for xref, ext, tipo, basefont, _ref, _enc in fuentes_pagina:
             nombre_pdf = basefont or f"(sin nombre, xref {xref})"
             if xref not in clasificadas:
-                clasificadas[xref] = clasificar_fuente(doc, xref, nombre_pdf, tipo, ext)
-            emb = clasificadas[xref]
+                # Cada fuente se analiza por separado: una rota nunca frena a las demás
+                try:
+                    clasificadas[xref] = (clasificar_fuente(doc, xref, nombre_pdf, tipo, ext), "")
+                except Exception as e:
+                    clasificadas[xref] = (Embebido.NO_ANALIZADA, type(e).__name__)
+            emb, error = clasificadas[xref]
             clave = (sin_prefijo(nombre_pdf), emb)
             info = grupos.get(clave)
             if info is None:
-                info = InfoFuente(sin_prefijo(nombre_pdf), nombre_pdf, tipo, ext, emb)
+                info = InfoFuente(sin_prefijo(nombre_pdf), nombre_pdf, tipo, ext, emb, error=error)
                 grupos[clave] = info
             if xref not in info.xrefs:
                 info.xrefs.append(xref)
@@ -484,8 +614,11 @@ def analizar_fuentes(doc: pymupdf.Document,
     for f in fuentes:
         if f.embebido == Embebido.TYPE3:
             continue
-        if indice is not None:
-            f.instalada = indice.buscar(f.nombre)
-        if incluidas is not None:
-            f.incluida = incluidas.buscar(f.nombre)
+        try:
+            if indice is not None:
+                f.instalada = indice.buscar(f.nombre)
+            if incluidas is not None:
+                f.incluida = incluidas.buscar(f.nombre)
+        except Exception as e:
+            f.error = f.error or type(e).__name__
     return fuentes

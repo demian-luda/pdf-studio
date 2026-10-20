@@ -105,8 +105,7 @@ Oyente = Callable[[], None]
 class Documento:
     def __init__(self, ruta: str | Path, contrasena: str | None = None):
         self.ruta_original = Path(ruta).resolve()
-        if not self.ruta_original.is_file():
-            raise ErrorDocumento(f"No existe el archivo: {self.ruta_original}")
+        validar_archivo(self.ruta_original)
         self._contrasena = contrasena
         self._dir_trabajo = Path(tempfile.mkdtemp(prefix="pdfstudio_"))
         self._base = self._dir_trabajo / "original.pdf"
@@ -127,15 +126,19 @@ class Documento:
     # ------------------------------------------------------------------ apertura
     def _abrir(self, ruta: Path) -> pymupdf.Document:
         try:
-            doc = pymupdf.open(ruta)
+            doc = pymupdf.open(ruta, filetype="pdf")
         except Exception as e:  # PyMuPDF lanza varios tipos según el daño del archivo
-            raise ErrorDocumento(f"No se pudo abrir el PDF: {e}") from e
+            raise ErrorDocumento(f"«{self.ruta_original.name}» está dañado y no se puede abrir "
+                                 f"({type(e).__name__}).") from e
         if not doc.is_pdf:
             doc.close()
-            raise ErrorDocumento("El archivo no es un PDF.")
+            raise ErrorDocumento(f"«{self.ruta_original.name}» no es un PDF.")
         if doc.needs_pass and not doc.authenticate(self._contrasena or ""):
             doc.close()
             raise ErrorContrasena("El PDF está protegido con contraseña.")
+        if doc.page_count == 0:
+            doc.close()
+            raise ErrorDocumento(f"«{self.ruta_original.name}» no tiene páginas (está dañado o incompleto).")
         return doc
 
     def _abrir_base(self) -> pymupdf.Document:
@@ -325,6 +328,25 @@ class Documento:
             self.doc.close()
         finally:
             shutil.rmtree(self._dir_trabajo, ignore_errors=True)
+
+
+def validar_archivo(ruta: Path) -> None:
+    """Chequeos previos con mensajes claros: que exista, que no esté vacío y que sea un PDF."""
+    if not ruta.exists():
+        raise ErrorDocumento(f"No existe el archivo: {ruta}")
+    if not ruta.is_file():
+        raise ErrorDocumento(f"«{ruta.name}» no es un archivo.")
+    try:
+        tamano = ruta.stat().st_size
+        with open(ruta, "rb") as f:
+            inicio = f.read(1024)
+    except OSError as e:
+        raise ErrorDocumento(f"No se pudo leer «{ruta.name}»: {e.strerror or e}") from e
+    if tamano == 0:
+        raise ErrorDocumento(f"«{ruta.name}» está vacío (0 bytes). Puede que la descarga o la copia "
+                             "no haya terminado: probá bajarlo de nuevo.")
+    if b"%PDF-" not in inicio:
+        raise ErrorDocumento(f"«{ruta.name}» no es un PDF (su contenido no tiene el formato de un PDF).")
 
 
 def _empieza_con(ruta: Path, prefijo: Path) -> bool:

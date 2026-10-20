@@ -159,7 +159,7 @@ class PanelFirmas(QWidget):
         self.b_agregar = QPushButton("Agregar firma…", self)
         self.b_fondo = QPushButton("Quitar fondo…", self)
         self.b_eliminar = QPushButton("Eliminar", self)
-        for boton, icono in ((self.b_insertar, "image-plus"), (self.b_agregar, "plus"), (self.b_fondo, "eraser"),
+        for boton, icono in ((self.b_insertar, "signature"), (self.b_agregar, "plus"), (self.b_fondo, "eraser"),
                              (self.b_eliminar, "trash")):
             iconos.asignar(boton, icono)
         self.b_insertar.clicked.connect(lambda: self._con_seleccion(self.insertar))

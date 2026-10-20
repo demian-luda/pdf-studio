@@ -249,8 +249,12 @@ def test_panel_faltantes_y_copiar(ventana):
     assert "1 elemento" in ventana.faltantes.resumen.text()
 
 
-def test_chequeo_al_abrir_muestra_fuentes(ventana, copia_pdf):
+def test_chequeo_al_abrir_muestra_fuentes(ventana, copia_pdf, qtbot):
     ventana.abrir(copia_pdf("fuentes_recortadas.pdf"))
+    assert ventana.faltantes.estado("documento") == "analizando"     # no bloquea: corre aparte
+    qtbot.waitUntil(lambda: not ventana.analisis_en_curso, timeout=60_000)
+    assert ventana.faltantes.estado("documento") == "ok"
+    assert ventana.etiqueta_analisis.text() == ""                     # el estado se limpia
     tabla = ventana.panel_fuentes.tabla
     assert tabla.rowCount() == 4
     nombres = {tabla.item(i, 0).text() for i in range(4)}

@@ -48,3 +48,15 @@ def cache_aislada(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DIR_CACHE", tmp_path / "cache")
     monkeypatch.setattr(fuentes, "_indice_incluidas", None)
     yield
+
+
+@pytest.fixture(autouse=True)
+def sin_dialogos_modales(monkeypatch):
+    """Si un test olvida reemplazar un diálogo, falla en vez de quedar colgado esperando."""
+    from PySide6.QtWidgets import QMessageBox
+
+    def prohibido(*a, **k):
+        raise AssertionError("Un test abrió un diálogo modal sin reemplazarlo")
+    for nombre in ("information", "critical", "question", "warning"):
+        monkeypatch.setattr(QMessageBox, nombre, staticmethod(prohibido))
+    yield

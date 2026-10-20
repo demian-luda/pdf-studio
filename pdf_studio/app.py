@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-import traceback
 
 
 def _falta_paquete(nombre: str, error: Exception) -> int:
@@ -15,6 +14,10 @@ def _falta_paquete(nombre: str, error: Exception) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
+    if "--analizar-fuentes" in argv:
+        # Proceso auxiliar (versión empaquetada): análisis de fuentes sin interfaz
+        from pdf_studio.analisis_proceso import main as analizar
+        return analizar()
     import importlib
     for modulo, paquete in (("PySide6.QtWidgets", "PySide6"), ("pymupdf", "pymupdf"), ("numpy", "numpy"),
                             ("PIL", "Pillow"), ("fontTools", "fonttools")):
@@ -24,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
             return _falta_paquete(paquete, e)
 
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
 
     from pdf_studio import NOMBRE_APP
     from pdf_studio.config import DIR_RECURSOS
@@ -44,14 +47,10 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
     gestor().aplicar()
 
-    def excepcion_no_controlada(tipo, valor, tb):
-        # Nunca fallar en silencio: cualquier error inesperado se muestra
-        texto = "".join(traceback.format_exception(tipo, valor, tb))
-        print(texto, file=sys.stderr)
-        QMessageBox.critical(None, "Error inesperado",
-                             f"Ocurrió un error inesperado:\n\n{valor}\n\nDetalle técnico:\n{texto[-1500:]}")
-
-    sys.excepthook = excepcion_no_controlada
+    # Nunca fallar en silencio, pero tampoco en bucle: aviso una vez, detalle en el log
+    from pdf_studio.ui.errores import ManejadorErrores, registro
+    registro().info("Inicio de PDF Studio")
+    sys.excepthook = ManejadorErrores()
 
     ventana = VentanaPrincipal()
     ventana.show()

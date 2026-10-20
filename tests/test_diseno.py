@@ -203,3 +203,18 @@ def test_tooltip_de_nota_en_el_visor(ventana, copia_pdf):
     rect = next(pag.annots()).rect
     centro = ventana.visor.a_escena(0, rect).center()
     assert ventana.visor.nota_en(centro) == "Revisar este dato"
+
+
+def test_icono_de_boton_primario_contrasta(qapp):
+    """En el botón principal (fondo de acento) el ícono usa el color de texto sobre acento."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QPushButton
+    for tema in ("claro", "oscuro"):
+        gestor().set_tema(tema)
+        boton = QPushButton("Insertar")
+        boton.setProperty("primario", True)
+        iconos.asignar(boton, "signature")
+        img = boton.icon().pixmap(48, 48).toImage()
+        colores = {img.pixelColor(x, y).name() for x in range(img.width()) for y in range(img.height())
+                   if img.pixelColor(x, y).alpha() > 200}
+        assert QColor(gestor().paleta.sobre_acento).name() in colores

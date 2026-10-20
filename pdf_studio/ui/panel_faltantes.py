@@ -111,6 +111,9 @@ class PanelFaltantes(QWidget):
         super().__init__(parent)
         self._generales: list[Faltante] = []
         self._de_documento: list[Faltante] = []
+        # Estado de cada análisis: None (no corresponde), 'analizando', 'ok' o 'error'
+        self._estados: dict[str, str | None] = {"inicio": None, "documento": None}
+        self._detalles: dict[str, str] = {}
         encabezado = QHBoxLayout()
         encabezado.addWidget(encabezado_panel("Faltantes", self), 1)
         boton = QToolButton(self)
@@ -147,6 +150,20 @@ class PanelFaltantes(QWidget):
         self._de_documento = faltantes
         self._redibujar()
 
+    def set_estado(self, clave: str, estado: str | None, detalle: str = "") -> None:
+        self._estados[clave] = estado
+        self._detalles[clave] = detalle
+        if clave == "documento" and estado in (None, "analizando"):
+            self._de_documento = []
+        self._redibujar()
+
+    def estado(self, clave: str) -> str | None:
+        return self._estados.get(clave)
+
+    @property
+    def hay_error(self) -> bool:
+        return "error" in self._estados.values()
+
     @property
     def faltantes(self) -> list[Faltante]:
         return self._de_documento + self._generales
@@ -165,14 +182,27 @@ class PanelFaltantes(QWidget):
             tarjeta = TarjetaFaltante(f, self.contenedor)
             tarjeta.instalar.connect(self.instalar.emit)
             self.capa_tarjetas.insertWidget(self.capa_tarjetas.count() - 1, tarjeta)
-        if not todos:
-            self.resumen.setText("No falta nada. Todo listo.")
-        else:
+        nombres = {"inicio": "las dependencias", "documento": "las fuentes del documento"}
+        analizando = [nombres[k] for k, e in self._estados.items() if e == "analizando"]
+        errores = [f"{nombres[k]}: {self._detalles.get(k) or 'error'}" for k, e in self._estados.items()
+                   if e == "error"]
+        pendiente = self._estados["inicio"] is None and not todos
+        partes = []
+        if todos:
             necesarios = sum(1 for f in todos if f.importancia == Importancia.NECESARIO)
             texto = f"{len(todos)} elemento(s) faltante(s)"
             if necesarios:
                 texto += f", {necesarios} necesario(s)"
-            self.resumen.setText(texto + ". Podés instalarlos desde acá o copiar el comando.")
+            partes.append(texto + ". Podés instalarlos desde acá o copiar el comando.")
+        if analizando:
+            partes.append("Analizando " + " y ".join(analizando) + "… los resultados aparecen solos.")
+        if errores:
+            partes.append("No se pudo completar el análisis de " + "; ".join(errores)
+                          + ". La lista puede estar incompleta: tocá «Volver a chequear».")
+        if not partes:
+            # "No falta nada" solo si todos los análisis terminaron bien
+            partes.append("Todavía no se chequeó nada." if pendiente else "No falta nada. Todo listo.")
+        self.resumen.setText(" ".join(partes))
 
 
 class PanelFuentes(QWidget):
@@ -207,8 +237,22 @@ class PanelFuentes(QWidget):
         item = self.tabla.item(fila, 0) if fila >= 0 else None
         self.reemplazar_fuente.emit(item.text() if item is not None else "")
 
+    def set_estado(self, estado: str, detalle: str = "") -> None:
+        """'analizando' o 'error' (las fuentes llegan después con set_fuentes)."""
+        self.tabla.setRowCount(0)
+        if estado == "analizando":
+            self.titulo.setText("Fuentes del documento (analizando…)")
+        else:
+            self.titulo.setText("Fuentes del documento (no se pudo analizar)")
+            self.tabla.setRowCount(1)
+            item = QTableWidgetItem(detalle or "El análisis falló.")
+            item.setForeground(QColor(gestor().paleta.peligro))
+            self.tabla.setItem(0, 0, item)
+        self.boton_reemplazar.setEnabled(estado != "analizando")
+
     def set_fuentes(self, fuentes: list[InfoFuente] | None) -> None:
         fuentes = fuentes or []
+        self.boton_reemplazar.setEnabled(True)
         p = gestor().paleta
         self.tabla.setRowCount(len(fuentes))
         for fila, f in enumerate(fuentes):
@@ -223,7 +267,8 @@ class PanelFuentes(QWidget):
             else:
                 en_windows = "No instalada"
             embebido = {Embebido.COMPLETA: "Completa", Embebido.SUBCONJUNTO: "Recortada",
-                        Embebido.NO_EMBEBIDA: "No embebida", Embebido.TYPE3: "Type 3"}[f.embebido]
+                        Embebido.NO_EMBEBIDA: "No embebida", Embebido.TYPE3: "Type 3",
+                        Embebido.NO_ANALIZADA: "No se pudo analizar"}[f.embebido]
             paginas = ", ".join(str(n + 1) for n in f.paginas[:8]) + ("…" if len(f.paginas) > 8 else "")
             for col, valor in enumerate((f.nombre, embebido, en_windows)):
                 item = QTableWidgetItem(valor)

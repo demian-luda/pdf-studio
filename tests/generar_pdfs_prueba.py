@@ -238,6 +238,9 @@ def main() -> None:
     for g in GENERADORES:
         g()
         print("Generado:", g.__name__)
+    from tests.fuentes_sinteticas import generar
+    for ruta in generar():
+        print("Generado:", ruta.name)
 
 
 if __name__ == "__main__":

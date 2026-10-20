@@ -284,7 +284,7 @@ def construir_codificador(doc: pymupdf.Document, xref: int,
             a_codigo[texto] = codigo
     embebido = clasificar_fuente(doc, xref, nombre, subtipo, ext)
     disponibles = None
-    if embebido in (Embebido.SUBCONJUNTO, Embebido.TYPE3):
+    if embebido.solo_letras_usadas:
         disponibles = usados if usados is not None else caracteres_usados(doc, nombre)
     return CodificadorFuente(xref, nombre, subtipo, embebido, bytes_codigo, a_codigo, anchos, defecto,
                              disponibles, escala, metricas)

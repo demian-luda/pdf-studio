@@ -232,6 +232,10 @@ def faltante_de_fuente(f: InfoFuente) -> Faltante | None:
         problema = ("Está embebida como subconjunto: el PDF solo trae las letras que usa. "
                     "Para escribir texto nuevo con esta fuente hace falta la fuente completa.")
         importancia = Importancia.OPCIONAL
+    elif f.embebido == Embebido.NO_ANALIZADA:
+        problema = ("Está embebida, pero no se pudo analizar qué letras trae. El documento se ve bien; "
+                    "para escribir texto nuevo conviene tener la fuente completa.")
+        importancia = Importancia.OPCIONAL
     else:
         problema = ("No está embebida ni instalada: el PDF se muestra con una fuente de reemplazo "
                     "y puede verse distinto al original.")
@@ -257,12 +261,19 @@ def chequear_fuentes(doc: pymupdf.Document, indice: IndiceFuentesSistema | None,
                      incluidas: IndiceFuentesSistema | None = None,
                      ) -> tuple[list[InfoFuente], list[Faltante]]:
     fuentes = analizar_fuentes(doc, indice, incluidas)
+    return fuentes, faltantes_de_fuentes(fuentes)
+
+
+def faltantes_de_fuentes(fuentes: list[InfoFuente]) -> list[Faltante]:
     faltantes: dict[str, Faltante] = {}
     for f in fuentes:
-        falta = faltante_de_fuente(f)
+        try:
+            falta = faltante_de_fuente(f)
+        except Exception:
+            falta = None      # una fuente rara nunca frena el resto del informe
         if falta is not None and falta.clave not in faltantes:
             faltantes[falta.clave] = falta
-    return fuentes, list(faltantes.values())
+    return list(faltantes.values())
 
 
 # ---------------------------------------------------------------------- general

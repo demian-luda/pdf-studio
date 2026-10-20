@@ -100,6 +100,7 @@ class Visor(QGraphicsView):
         self._zoom = 1.0
         self._ajuste: str | None = "ancho"   # 'ancho', 'pagina' o None (zoom manual)
         self._cache: OrderedDict[tuple[int, int], QImage] = OrderedDict()
+        self._paginas_rotas: set[int] = set()
         self._cache_max = 24
         self._resultados: list[tuple[int, pymupdf.Rect]] = []
         self._resultado_actual = -1
@@ -136,6 +137,7 @@ class Visor(QGraphicsView):
         """Rearma la escena (después de abrir, deshacer, rotar...). Mantiene la página visible."""
         pagina = self._pagina_actual
         self._cache.clear()
+        self._paginas_rotas = set()
         escena = self.scene()
         # La imagen que se está ubicando sobrevive a la reconstrucción de la escena
         colocacion = self.colocacion
@@ -177,6 +179,25 @@ class Visor(QGraphicsView):
                       escala: float) -> None:
         if self.documento is None:
             return
+        if indice in self._paginas_rotas:
+            self._pintar_aviso(painter, rect)
+            return
+        try:
+            self._pintar_pagina(painter, indice, rect, expuesto, escala)
+        except Exception as e:
+            # Una página dañada no puede tirar un error en cada repintado: se avisa una vez
+            from pdf_studio.ui.errores import registro
+            registro().error("No se pudo dibujar la página %d: %r", indice + 1, e)
+            self._paginas_rotas.add(indice)
+            self._pintar_aviso(painter, rect)
+
+    @staticmethod
+    def _pintar_aviso(painter: QPainter, rect: QRectF) -> None:
+        painter.setPen(QColor(gestor().paleta.peligro))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No se pudo mostrar esta página\n(está dañada)")
+
+    def _pintar_pagina(self, painter: QPainter, indice: int, rect: QRectF, expuesto: QRectF,
+                       escala: float) -> None:
         pag = self.documento.doc[indice]
         ancho_px = rect.width() * escala
         alto_px = rect.height() * escala

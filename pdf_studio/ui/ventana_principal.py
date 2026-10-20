@@ -24,9 +24,10 @@ from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, Inse
 from pdf_studio.core.paginas import RotarPagina
 from pdf_studio.core.sustitucion import PlanSustitucion
 from pdf_studio.core.texto import BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en, planificar
-from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_fuentes, chequear_inicio
+from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_inicio, faltantes_de_fuentes
 from pdf_studio.dependencias.instalador import Instalacion, instalacion_fuente
 from pdf_studio.ui import iconos
+from pdf_studio.ui.errores import registro
 from pdf_studio.ui.acerca import DialogoAcerca
 from pdf_studio.ui.barra_lateral import BarraLateral
 from pdf_studio.ui.busqueda import BarraBusqueda
@@ -38,6 +39,7 @@ from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.paleta_comandos import PaletaComandos
+from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo
 from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
 from pdf_studio.ui.sustitucion import DialogoSustitucion
 from pdf_studio.ui.tema import gestor
@@ -54,6 +56,11 @@ class VentanaPrincipal(QMainWindow):
         self.bloque: BloqueTexto | None = None        # texto seleccionado en modo Editar texto
         self._cache_fuentes: dict = {}
         self._acciones: list[tuple[QAction, str]] = []   # (acción, grupo) para la paleta de comandos
+        self._hilos: list[EnHilo] = []
+        self.analizador = AnalizadorFuentes(self)
+        self.analizador.terminado.connect(self._analisis_terminado)
+        self.analizador.fallo.connect(self._analisis_fallo)
+        self._mostrar_tras_analisis = False
         self.setWindowTitle(NOMBRE_APP)
         self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
@@ -100,6 +107,8 @@ class VentanaPrincipal(QMainWindow):
         iconos.asignar(self.boton_faltantes, "triangle-alert")
         self.etiqueta_pagina = QLabel("", self)
         self.etiqueta_zoom = QLabel("", self)
+        self.etiqueta_analisis = QLabel("", self)
+        self.statusBar().addPermanentWidget(self.etiqueta_analisis)
         self.statusBar().addPermanentWidget(self.boton_faltantes)
         self.statusBar().addPermanentWidget(self.etiqueta_pagina)
         self.statusBar().addPermanentWidget(self.etiqueta_zoom)
@@ -113,6 +122,9 @@ class VentanaPrincipal(QMainWindow):
         self._conectar()
         gestor().cambio.connect(self._tema_cambio)
         self._actualizar_estado()
+        # El índice de fuentes de Windows se arma en segundo plano (con caché en disco)
+        self._en_hilo(lambda: (indice_sistema().cargar(), indice_incluidas().cargar()), lambda _r: None,
+                      lambda e: registro().warning("No se pudo indexar las fuentes: %r", e))
         if chequear_al_iniciar:
             QTimer.singleShot(0, self.chequear_dependencias)
 
@@ -519,6 +531,9 @@ class VentanaPrincipal(QMainWindow):
                 return False
         doc = self.documento
         self.documento = None
+        self.analizador.cancelar()
+        self.faltantes.set_estado("documento", None)
+        self._estado_analisis()
         self.visor.set_documento(None)
         self.miniaturas.set_documento(None)
         self.busqueda.set_documento(None)
@@ -541,6 +556,8 @@ class VentanaPrincipal(QMainWindow):
 
     def closeEvent(self, evento: QCloseEvent) -> None:
         if self.cerrar_documento():
+            for hilo in list(self._hilos):
+                hilo.wait(10_000)       # no destruir hilos en marcha
             evento.accept()
         else:
             evento.ignore()
@@ -864,40 +881,97 @@ class VentanaPrincipal(QMainWindow):
         self._actualizar_estado()
 
     # ------------------------------------------------------------------ dependencias
+    def _en_hilo(self, funcion, al_terminar, al_fallar) -> EnHilo:
+        hilo = EnHilo(funcion, self)
+        hilo.listo.connect(al_terminar)
+        hilo.fallo.connect(al_fallar)
+        hilo.finished.connect(lambda h=hilo: self._hilos.remove(h) if h in self._hilos else None)
+        self._hilos.append(hilo)
+        hilo.start()
+        return hilo
+
+    def _estado_analisis(self) -> None:
+        """Etiqueta de la barra de estado mientras algo se analiza (se limpia sola)."""
+        partes = []
+        if self.faltantes.estado("inicio") == "analizando":
+            partes.append("dependencias")
+        if self.faltantes.estado("documento") == "analizando":
+            partes.append("fuentes del documento")
+        self.etiqueta_analisis.setText("Analizando " + " y ".join(partes) + "…" if partes else "")
+
     def chequear_dependencias(self, mostrar: bool = True) -> None:
-        faltan = chequear_inicio()
-        self.faltantes.set_generales(faltan)
+        """Chequea paquetes y programas en segundo plano (Tesseract puede tardar en responder)."""
+        self.faltantes.set_estado("inicio", "analizando")
+        self._estado_analisis()
+
+        def listo(faltan) -> None:
+            self.faltantes.set_generales(faltan)
+            self.faltantes.set_estado("inicio", "ok")
+            self._fin_de_analisis(mostrar)
+
+        def fallo(error) -> None:
+            registro().error("Falló el chequeo de dependencias: %r", error)
+            self.faltantes.set_estado("inicio", "error", "No se pudieron chequear las dependencias.")
+            self._fin_de_analisis(mostrar)
+
+        self._en_hilo(chequear_inicio, listo, fallo)
         if self.documento is not None:
             self._chequear_fuentes_documento(mostrar=False)
-        self._actualizar_insignia()
-        # El panel se abre solo si falta algo importante; lo opcional queda en el indicador de abajo
-        if mostrar and any(f.importancia != Importancia.OPCIONAL for f in self.faltantes.faltantes):
-            self.mostrar_faltantes()
 
     def _chequear_fuentes_documento(self, mostrar: bool = True) -> None:
+        """Analiza las fuentes del documento en otro proceso: la interfaz sigue usable."""
         if self.documento is None:
             return
-        indice = indice_sistema()
-        if not indice._cargado:
-            self.statusBar().showMessage("Analizando las fuentes instaladas (solo tarda la primera vez)…")
-            QApplication.processEvents()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            fuentes, faltan = chequear_fuentes(self.documento.doc, indice, indice_incluidas())
-        finally:
-            QApplication.restoreOverrideCursor()
+        doc = self.documento
+        ruta = doc.ruta_base
+        if doc.operaciones_activas:
+            # Hubo cambios (p. ej. se reemplazó una fuente): se analiza el estado actual
+            ruta = doc.ruta_base.with_name("analisis_actual.pdf")
+            try:
+                ruta.write_bytes(doc.doc.tobytes())
+            except Exception as e:
+                registro().error("No se pudo preparar el análisis: %r", e)
+                ruta = doc.ruta_base
+        self._mostrar_tras_analisis = mostrar
+        self.faltantes.set_estado("documento", "analizando")
+        self.panel_fuentes.set_estado("analizando")
+        self._estado_analisis()
+        self.analizador.iniciar(ruta, doc.contrasena)
+
+    def _analisis_terminado(self, fuentes) -> None:
+        if self.documento is None:
+            return
         self.panel_fuentes.set_fuentes(fuentes)
-        self.faltantes.set_documento(faltan)
+        self.faltantes.set_documento(faltantes_de_fuentes(fuentes))
+        self.faltantes.set_estado("documento", "ok")
+        self._fin_de_analisis(self._mostrar_tras_analisis)
+
+    def _analisis_fallo(self, mensaje: str) -> None:
+        registro().error("Falló el análisis de fuentes: %s", mensaje)
+        self.panel_fuentes.set_estado("error", mensaje)
+        self.faltantes.set_estado("documento", "error", mensaje)
+        self._fin_de_analisis(self._mostrar_tras_analisis)
+
+    def _fin_de_analisis(self, mostrar: bool) -> None:
+        self._estado_analisis()
         self._actualizar_insignia()
-        if mostrar and any(f.importancia != Importancia.OPCIONAL for f in faltan):
+        importante = any(f.importancia != Importancia.OPCIONAL for f in self.faltantes.faltantes)
+        if mostrar and (importante or self.faltantes.hay_error):
             self.mostrar_faltantes()
 
+    @property
+    def analisis_en_curso(self) -> bool:
+        return "analizando" in (self.faltantes.estado("inicio"), self.faltantes.estado("documento"))
     def _actualizar_insignia(self) -> None:
         n = len(self.faltantes.faltantes)
         self.lateral.set_insignia("faltantes", n)
-        self.boton_faltantes.setText(f"{n} faltante{'s' if n != 1 else ''}")
-        self.boton_faltantes.setToolTip("Ver qué falta instalar (Ctrl+Alt+3)")
-        self.boton_faltantes.setVisible(n > 0)
+        if self.faltantes.hay_error:
+            self.boton_faltantes.setText("Análisis incompleto")
+            self.boton_faltantes.setToolTip("No se pudo terminar el análisis: ver detalles (Ctrl+Alt+3)")
+        else:
+            self.boton_faltantes.setText(f"{n} faltante{'s' if n != 1 else ''}")
+            self.boton_faltantes.setToolTip("Ver qué falta instalar (Ctrl+Alt+3)")
+        self.boton_faltantes.setVisible(n > 0 or self.faltantes.hay_error)
 
     # ------------------------------------------------------------------ estado
     def _actualizar_estado(self) -> None:

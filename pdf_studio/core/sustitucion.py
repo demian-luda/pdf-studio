@@ -178,7 +178,7 @@ def candidatas(doc: pymupdf.Document, familia: FamiliaEnUso, incluidas: IndiceFu
     # No ofrecer la misma familia que se quiere reemplazar
     resultado = [c for c in resultado if familia_de(c.familia) != familia.clave]
     medido = _ancho_medio_original(doc, familia)
-    if medido:
+    if medido and medido[0] > 0:      # una fuente con anchos en 0 no sirve para comparar
         original, estilo, por_letra = medido
         for c in resultado:
             try:
