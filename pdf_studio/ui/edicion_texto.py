@@ -12,6 +12,7 @@ from pdf_studio.core.fuentes import Embebido
 from pdf_studio.core.texto import AnalisisFuente, BloqueTexto, Nivel, OpcionFuente
 from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
 from pdf_studio.ui import iconos
+from pdf_studio.ui.tema import marcar_primario
 
 TEXTO_NIVEL = {Nivel.FRAGMENTO: "fragmento", Nivel.LINEA: "línea", Nivel.PARRAFO: "párrafo"}
 
@@ -53,7 +54,7 @@ class DialogoEditarTexto(QDialog):
         self.boton_copiar: QPushButton | None = None
         self.botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         self.botones.button(QDialogButtonBox.StandardButton.Ok).setText("Aplicar")
-        self.botones.button(QDialogButtonBox.StandardButton.Ok).setProperty("primario", True)
+        marcar_primario(self.botones.button(QDialogButtonBox.StandardButton.Ok))
         self.botones.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
         self.botones.accepted.connect(self.accept)
         self.botones.rejected.connect(self.reject)
@@ -154,7 +155,7 @@ class DialogoEditarTexto(QDialog):
         texto.setWordWrap(True)
         botones = QHBoxLayout()
         self.boton_instalar = QPushButton("Instalar fuente", fila)
-        self.boton_instalar.setProperty("primario", True)
+        marcar_primario(self.boton_instalar)
         iconos.asignar(self.boton_instalar, "download")
         self.boton_instalar.setEnabled(self._instalar is not None)
         self.boton_instalar.clicked.connect(lambda: self._instalar_fuente(a.instalable))

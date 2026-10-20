@@ -60,3 +60,21 @@ def sin_dialogos_modales(monkeypatch):
     for nombre in ("information", "critical", "question", "warning"):
         monkeypatch.setattr(QMessageBox, nombre, staticmethod(prohibido))
     yield
+
+
+@pytest.fixture
+def ventana(qtbot, monkeypatch, tmp_path):
+    from pdf_studio.core.imagenes import BibliotecaFirmas
+    from pdf_studio.ui.ventana_principal import VentanaPrincipal
+    v = VentanaPrincipal(chequear_al_iniciar=False, biblioteca=BibliotecaFirmas(tmp_path / "firmas"))
+    qtbot.addWidget(v)
+    v.resize(1100, 800)
+    v.show()
+    qtbot.waitExposed(v)
+    mensajes = []
+    monkeypatch.setattr(v, "_informar", lambda t, x, error=False: mensajes.append((t, x, error)))
+    monkeypatch.setattr(v, "_mostrar_guardado", lambda g, d: mensajes.append(("guardado", g, d)))
+    monkeypatch.setattr(v, "_preguntar_guardar_cambios", lambda: "descartar")
+    v.mensajes = mensajes
+    yield v
+    v.cerrar_documento()

@@ -73,11 +73,29 @@ def contraste(a: str, b: str) -> float:
 
 
 # ---------------------------------------------------------------------- hoja de estilos
+def _icono_qss(nombre: str, color: str) -> str:
+    """Ruta (con barras /) a una copia del ícono Lucide pintada del color pedido, para usar
+    en la hoja de estilos (Qt no puede colorear un SVG desde la hoja de estilos)."""
+    from pdf_studio import config
+    destino = config.DIR_CACHE / "qss" / f"{nombre}_{color.lstrip('#')}.svg"
+    try:
+        if not destino.is_file():
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            svg = (config.DIR_RECURSOS / "iconos" / f"{nombre}.svg").read_text(encoding="utf-8")
+            destino.write_text(svg.replace("currentColor", color).replace('stroke-width="2"', 'stroke-width="3"'),
+                               encoding="utf-8")
+    except OSError:
+        return ""
+    return destino.as_posix()
+
+
 def hoja_de_estilos(p: Paleta, escala: float) -> str:
     t = round(TAMANO_BASE * escala, 1)
     chico = round(TAMANO_BASE * escala * 0.9, 1)
     r = round(6 * escala)
     pad = round(4 * escala)
+    ind = round(14 * escala)
+    check = _icono_qss("check", p.sobre_acento)
     return f"""
 * {{ font-size: {t}pt; }}
 QWidget {{ color: {p.texto}; background: {p.fondo}; selection-background-color: {p.acento};
@@ -125,6 +143,16 @@ QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBo
     border: 2px solid {p.acento}; }}
 QComboBox QAbstractItemView {{ background: {p.superficie}; border: 1px solid {p.borde}; }}
 QCheckBox, QRadioButton, QLabel {{ background: transparent; }}
+QCheckBox::indicator, QRadioButton::indicator {{ width: {ind}px; height: {ind}px; background: {p.superficie};
+    border: 1px solid {p.borde_control}; }}
+QCheckBox::indicator {{ border-radius: {max(2, r - 3)}px; }}
+QRadioButton::indicator {{ border-radius: {ind // 2 + 1}px; }}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {p.acento}; }}
+QCheckBox::indicator:checked {{ background: {p.acento}; border-color: {p.acento}; image: url("{check}"); }}
+QRadioButton::indicator:checked {{ border: 1px solid {p.acento}; background: qradialgradient(cx:0.5, cy:0.5,
+    radius:0.5, fx:0.5, fy:0.5, stop:0 {p.acento}, stop:0.45 {p.acento}, stop:0.55 {p.superficie},
+    stop:1 {p.superficie}); }}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ border-color: {p.borde}; background: {p.fondo}; }}
 QCheckBox:focus, QRadioButton:focus {{ color: {p.acento}; }}
 QCheckBox:disabled, QRadioButton:disabled {{ color: {p.texto_suave}; }}
 QGroupBox {{ border: 1px solid {p.borde}; border-radius: {r}px; margin-top: {pad * 3}px; padding: {pad * 2}px; }}
@@ -155,6 +183,9 @@ QDockWidget::title {{ background: {p.superficie}; padding: {pad + 2}px; text-ali
 #tarjeta QLabel {{ background: transparent; }}
 #titulo_panel {{ font-weight: 600; font-size: {round(t * 1.05, 1)}pt; }}
 #texto_suave {{ color: {p.texto_suave}; }}
+#texto_aviso {{ color: {p.aviso}; }}
+#barra_aviso {{ background: {p.acento_suave}; border-bottom: 1px solid {p.borde}; }}
+#barra_aviso QLabel {{ background: transparent; color: {p.texto}; }}
 QStatusBar {{ background: {p.superficie}; color: {p.texto_suave}; border-top: 1px solid {p.borde}; }}
 QStatusBar QLabel {{ color: {p.texto_suave}; font-size: {chico}pt; padding: 0 {pad * 2}px; }}
 QStatusBar::item {{ border: none; }}
@@ -180,6 +211,17 @@ QSplitter::handle {{ background: {p.borde}; }}
 #paleta_comandos QTreeWidget::item:selected {{ background: {p.acento_suave}; color: {p.texto}; }}
 QTreeView::item:selected {{ background: {p.acento_suave}; color: {p.texto}; }}
 """
+
+
+def marcar_primario(boton) -> None:
+    """Marca el botón principal de un diálogo. Hay que re-aplicar el estilo: Qt evalúa los
+    selectores por propiedad al «pulir» el widget, y los botones de QDialogButtonBox ya
+    vienen pulidos."""
+    boton.setProperty("primario", True)
+    estilo = boton.style()
+    estilo.unpolish(boton)
+    estilo.polish(boton)
+    boton.update()
 
 
 def _qpalette(p: Paleta) -> QPalette:

@@ -4,6 +4,8 @@
   NUNCA se usa para PyMuPDF: MuPDF no admite hilos.
 - AnalizadorFuentes: analiza las fuentes de un PDF en un proceso aparte (ver
   pdf_studio.analisis_proceso) y avisa con señales al terminar o al fallar.
+- ProcesoExterno: corre un programa (ocrmypdf, Ghostscript) sin trabar la interfaz,
+  con cancelación y tiempo máximo.
 """
 from __future__ import annotations
 
@@ -123,3 +125,77 @@ class AnalizadorFuentes(QObject):
         if self._proceso is not None:
             self.cancelar()
             self.fallo.emit("El análisis de fuentes tardó demasiado y se canceló.")
+
+
+class ProcesoExterno(QObject):
+    """Corre un programa externo. Emite terminado(código, salida de error) al terminar
+    (código -1 si no arrancó, -2 si se canceló o venció el tiempo)."""
+
+    terminado = Signal(int, str)
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._proceso: QProcess | None = None
+        self._reloj = QTimer(self)
+        self._reloj.setSingleShot(True)
+        self._reloj.timeout.connect(self._vencido)
+        self.vencio = False
+
+    @property
+    def ocupado(self) -> bool:
+        return self._proceso is not None
+
+    def iniciar(self, programa: str, argumentos: list[str], entorno: dict[str, str] | None = None,
+                tiempo_maximo_ms: int = 3_600_000) -> None:
+        from PySide6.QtCore import QProcessEnvironment
+
+        self.cancelar()
+        self.vencio = False
+        proceso = QProcess(self)
+        if entorno is not None:
+            env = QProcessEnvironment()
+            for clave, valor in entorno.items():
+                env.insert(clave, valor)
+            proceso.setProcessEnvironment(env)
+        proceso.finished.connect(lambda codigo, _estado, p=proceso: self._fin(p, codigo))
+        proceso.errorOccurred.connect(lambda error, p=proceso: self._error(p, error))
+        self._proceso = proceso
+        proceso.start(programa, argumentos)
+        self._reloj.start(tiempo_maximo_ms)
+
+    def esperar(self, ms: int) -> bool:
+        """Solo para tests: espera a que termine."""
+        return self._proceso is None or self._proceso.waitForFinished(ms)
+
+    def cancelar(self) -> bool:
+        """Corta el proceso en marcha. Devuelve True si había uno."""
+        proceso, self._proceso = self._proceso, None
+        self._reloj.stop()
+        if proceso is None:
+            return False
+        proceso.blockSignals(True)
+        proceso.kill()
+        proceso.waitForFinished(5000)
+        proceso.deleteLater()
+        return True
+
+    def _fin(self, proceso: QProcess, codigo: int) -> None:
+        if proceso is not self._proceso:
+            return
+        self._proceso = None
+        self._reloj.stop()
+        error = bytes(proceso.readAllStandardError()).decode("utf-8", errors="replace")
+        proceso.deleteLater()
+        self.terminado.emit(int(codigo), error)
+
+    def _error(self, proceso: QProcess, error) -> None:
+        if proceso is not self._proceso or error != QProcess.ProcessError.FailedToStart:
+            return
+        self._proceso = None
+        self._reloj.stop()
+        self.terminado.emit(-1, "No se pudo iniciar el programa.")
+
+    def _vencido(self) -> None:
+        if self.cancelar():
+            self.vencio = True
+            self.terminado.emit(-2, "El proceso tardó demasiado y se canceló.")

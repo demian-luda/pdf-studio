@@ -41,6 +41,7 @@ class ResultadoFidelidad:
     dpi: int
     comparadas: list[int] = field(default_factory=list)   # páginas del resultado comparadas
     parciales: list[int] = field(default_factory=list)    # editadas, comparadas fuera de las zonas editadas
+    enteras: list[int] = field(default_factory=list)      # editadas sin cambio visible (p. ej. OCR invisible)
     excluidas: list[int] = field(default_factory=list)    # páginas editadas (no se comparan)
     diferencias: list[DiferenciaPagina] = field(default_factory=list)
     completa: bool = True                                  # False si el usuario canceló
@@ -64,14 +65,22 @@ class ResultadoFidelidad:
                 partes.append("¡Atención! En páginas editadas cambió algo fuera de la zona editada: "
                               + ", ".join(str(d.pagina + 1) for d in zonas) + ".")
             return " ".join(partes)
-        if not self.comparadas:
+        if not self.comparadas and not self.parciales:
             return "No había páginas sin editar para comparar."
-        texto = (f"Fidelidad verificada: {len(self.comparadas)} páginas sin editar son idénticas "
-                 f"al original (diferencia de píxeles = 0 a {self.dpi} dpi).")
-        if self.parciales:
-            texto += (f" En {len(self.parciales)} página(s) editada(s), todo lo que está fuera de "
-                      "las zonas editadas también es idéntico.")
-        return texto
+        partes = []
+        if self.comparadas:
+            partes.append(f"Fidelidad verificada: {len(self.comparadas)} páginas sin editar son idénticas "
+                          f"al original (diferencia de píxeles = 0 a {self.dpi} dpi).")
+        enteras = [p for p in self.parciales if p in self.enteras]
+        con_zonas = len(self.parciales) - len(enteras)
+        if enteras:
+            partes.append(f"{'Además, l' if partes else 'Fidelidad verificada: l'}as {len(enteras)} página(s) "
+                          f"editada(s) sin cambios visibles se ven idénticas al original (diferencia de "
+                          f"píxeles = 0 a {self.dpi} dpi).")
+        if con_zonas:
+            partes.append(f"En {con_zonas} página(s) editada(s), todo lo que está fuera de "
+                          "las zonas editadas también es idéntico.")
+        return " ".join(partes)
 
 
 def _abrir(ruta: Path | str, contrasena: str | None) -> pymupdf.Document:
@@ -144,6 +153,8 @@ def comparar_documentos(
                 break
             distintos, total, motivo = comparar_paginas(original[i_orig], resultado[i_res], dpi, zonas)
             (res.comparadas if zonas is None else res.parciales).append(i_res)
+            if zonas is not None and not zonas:
+                res.enteras.append(i_res)
             if distintos:
                 res.diferencias.append(DiferenciaPagina(i_res, i_orig, distintos, total, motivo))
         if progreso is not None and res.completa:

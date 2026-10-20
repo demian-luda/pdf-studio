@@ -15,6 +15,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout
 
 from pdf_studio import config
+from pdf_studio.ui.tema import marcar_primario
 
 DIR_LOGS = config.DIR_APPDATA / "logs"
 ARCHIVO_LOG = DIR_LOGS / "pdfstudio.log"
@@ -66,7 +67,7 @@ class DialogoError(QDialog):
         self.copiar.clicked.connect(lambda: (QGuiApplication.clipboard().setText(detalle),
                                              self.copiar.setText("Detalle copiado")))
         cerrar = QPushButton("Seguir", self)
-        cerrar.setProperty("primario", True)
+        marcar_primario(cerrar)
         cerrar.clicked.connect(self.accept)
         fila = QHBoxLayout()
         fila.addWidget(ver)

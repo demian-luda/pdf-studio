@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLa
 
 from pdf_studio import NOMBRE_APP, __version__
 from pdf_studio.config import DIR_RECURSOS
+from pdf_studio.ui.tema import marcar_primario
 
 
 class DialogoAcerca(QDialog):
@@ -31,7 +32,7 @@ class DialogoAcerca(QDialog):
         creditos.setObjectName("texto_suave")
         creditos.setWordWrap(True)
         cerrar = QPushButton("Cerrar", self)
-        cerrar.setProperty("primario", True)
+        marcar_primario(cerrar)
         cerrar.clicked.connect(self.accept)
         arriba = QHBoxLayout()
         arriba.addWidget(logo, 0, Qt.AlignmentFlag.AlignTop)

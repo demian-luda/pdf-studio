@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QImage, QKeySequence
@@ -19,6 +20,8 @@ from pdf_studio.config import DIR_RECURSOS
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado
 from pdf_studio.core.fuentes import familia_de, indice_incluidas, indice_sistema
+from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrmypdf, crear_operacion,
+                                 entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto, parece_escaneado)
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.paginas import RotarPagina
@@ -33,13 +36,15 @@ from pdf_studio.ui.barra_lateral import BarraLateral
 from pdf_studio.ui.busqueda import BarraBusqueda
 from pdf_studio.ui.cinta import Encabezado
 from pdf_studio.ui.colocacion import ImagenColocable
+from pdf_studio.ui.comunes import BarraAviso
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
+from pdf_studio.ui.ocr import DialogoOCR
 from pdf_studio.ui.paleta_comandos import PaletaComandos
-from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo
+from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo, ProcesoExterno
 from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
 from pdf_studio.ui.sustitucion import DialogoSustitucion
 from pdf_studio.ui.tema import gestor
@@ -61,19 +66,27 @@ class VentanaPrincipal(QMainWindow):
         self.analizador.terminado.connect(self._analisis_terminado)
         self.analizador.fallo.connect(self._analisis_fallo)
         self._mostrar_tras_analisis = False
+        self.proceso_ocr = ProcesoExterno(self)
+        self.proceso_ocr.terminado.connect(self._ocr_terminado)
+        self._ocr: tuple | None = None            # (modo, páginas, salida, documento) del OCR en curso
+        self._progreso_ocr: QProgressDialog | None = None
         self.setWindowTitle(NOMBRE_APP)
         self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
         self.setAcceptDrops(True)
 
-        # Centro: barra de búsqueda + visor
+        # Centro: aviso + barra de búsqueda + visor
         self.visor = Visor(self)
         self.busqueda = BarraBusqueda(self)
         self.busqueda.hide()
+        self.aviso = BarraAviso(self)
+        self.aviso.accion.connect(self._accion_aviso)
+        self._accion_del_aviso = None
         centro = QWidget(self)
         capa = QVBoxLayout(centro)
         capa.setContentsMargins(0, 0, 0, 0)
         capa.setSpacing(0)
+        capa.addWidget(self.aviso)
         capa.addWidget(self.busqueda)
         capa.addWidget(self.visor, 1)
         self.setCentralWidget(centro)
@@ -240,6 +253,8 @@ class VentanaPrincipal(QMainWindow):
 
         self.acc_sustituir = self._accion("Reemplazar fuente…", "replace", None, lambda: self.sustituir_fuentes(),
                                           grupo=H, tip="Modo armónico: reemplaza una fuente en todo el documento.")
+        self.acc_ocr = self._accion("Reconocer texto (OCR)…", "scan-text", "Ctrl+Shift+O", self.reconocer_texto,
+                                    grupo=H, tip="Hace buscable y copiable el texto de páginas escaneadas.")
         self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.chequear_dependencias,
                                          grupo=H)
         self.acc_paleta = self._accion("Paleta de comandos", "command", "Ctrl+K", self.abrir_paleta, grupo=H,
@@ -309,7 +324,7 @@ class VentanaPrincipal(QMainWindow):
         for a in (self.acc_rotar_izq, self.acc_rotar_der):
             paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
+        for a in (self.acc_ocr, None, self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
         enc.pestanas.setCurrentIndex(1)       # arranca en "Editar"
@@ -429,6 +444,12 @@ class VentanaPrincipal(QMainWindow):
             return dialogo.plan
         return None
 
+    def _dialogo_ocr(self, sin_texto: list[int]) -> tuple[ModoOCR, list[int]] | None:
+        dialogo = DialogoOCR(self.documento.doc.page_count, self.visor.pagina_actual, sin_texto, self)
+        if dialogo.exec():
+            return dialogo.modo, dialogo.paginas
+        return None
+
     def _confirmar_instalacion(self, inst: Instalacion) -> bool:
         return bool(DialogoConfirmarInstalacion(inst, self).exec())
 
@@ -517,7 +538,20 @@ class VentanaPrincipal(QMainWindow):
         self._chequear_fuentes_documento()
         self._actualizar_estado()
         self.statusBar().showMessage(f"Abierto: {ruta.name} ({documento.doc.page_count} páginas)", 5000)
+        if parece_escaneado(documento.doc):
+            self.mostrar_aviso("Este PDF parece escaneado: sus páginas son imágenes sin texto. Con el OCR "
+                               "podés buscar, seleccionar y copiar el texto, sin que cambie su aspecto.",
+                               "Reconocer texto…", self.reconocer_texto, "scan-text")
         return True
+
+    # ------------------------------------------------------------------ aviso arriba del visor
+    def mostrar_aviso(self, texto: str, boton: str, accion, icono: str = "info") -> None:
+        self._accion_del_aviso = accion
+        self.aviso.mostrar(texto, boton, icono)
+
+    def _accion_aviso(self) -> None:
+        if self._accion_del_aviso is not None:
+            self._accion_del_aviso()
 
     def cerrar_documento(self) -> bool:
         """Cierra el documento actual. Devuelve False si el usuario canceló."""
@@ -532,6 +566,8 @@ class VentanaPrincipal(QMainWindow):
         doc = self.documento
         self.documento = None
         self.analizador.cancelar()
+        self.cancelar_ocr()
+        self.aviso.hide()
         self.faltantes.set_estado("documento", None)
         self._estado_analisis()
         self.visor.set_documento(None)
@@ -774,6 +810,96 @@ class VentanaPrincipal(QMainWindow):
         self.panel_firmas.set_colocando(False)
         self.statusBar().clearMessage()
 
+    # ------------------------------------------------------------------ OCR
+    def reconocer_texto(self) -> bool:
+        """Pide modo y páginas, y corre ocrmypdf en otro proceso (la interfaz sigue respondiendo)."""
+        if self.documento is None or self.proceso_ocr.ocupado:
+            return False
+        eleccion = self._dialogo_ocr(paginas_sin_texto(self.documento.doc))
+        if eleccion is None:
+            return False
+        modo, paginas = eleccion
+        try:
+            entorno = entorno_ocr()
+        except ErrorOCR as e:
+            self._informar("Reconocer texto", str(e), error=True)
+            self.chequear_dependencias(mostrar=True)
+            return False
+        carpeta = self.documento.carpeta_trabajo
+        entrada, salida = carpeta / "ocr_entrada.pdf", carpeta / "ocr_salida.pdf"
+        try:
+            salida.unlink(missing_ok=True)
+            # El estado actual (con las ediciones hechas) y sin cifrar: ocrmypdf no lee PDFs protegidos
+            self.documento.doc.save(entrada, garbage=0, encryption=pymupdf.PDF_ENCRYPT_NONE)
+        except Exception as e:
+            self._informar("Reconocer texto", f"No se pudo preparar el OCR ({type(e).__name__}).", error=True)
+            return False
+        programa, argumentos = comando_ocrmypdf(entrada, salida, paginas)
+        self._ocr = (modo, paginas, salida, self.documento)
+        self.proceso_ocr.iniciar(programa, argumentos, entorno)
+        n = len(paginas)
+        progreso = QProgressDialog(f"Reconociendo texto en {n} página{'s' if n != 1 else ''}…", "Cancelar",
+                                   0, 0, self)
+        progreso.setWindowTitle("Reconocer texto (OCR)")
+        progreso.setWindowModality(Qt.WindowModality.WindowModal)
+        progreso.setMinimumDuration(0)
+        progreso.canceled.connect(self.cancelar_ocr)
+        progreso.show()
+        self._progreso_ocr = progreso
+        self._estado_analisis()
+        return True
+
+    def cancelar_ocr(self) -> None:
+        if self.proceso_ocr.cancelar():
+            self.statusBar().showMessage("Se canceló el OCR.", 5000)
+        self._ocr = None
+        self._cerrar_progreso_ocr()
+
+    def _cerrar_progreso_ocr(self) -> None:
+        progreso, self._progreso_ocr = self._progreso_ocr, None
+        if progreso is not None:
+            progreso.blockSignals(True)
+            progreso.close()
+            progreso.deleteLater()
+        self._estado_analisis()
+
+    def _ocr_terminado(self, codigo: int, error: str) -> None:
+        self._cerrar_progreso_ocr()
+        pendiente, self._ocr = self._ocr, None
+        if pendiente is None:
+            return
+        modo, paginas, salida, documento = pendiente
+        if documento is not self.documento:
+            return
+        if codigo != 0:
+            mensaje = error if codigo < 0 else mensaje_de_error_ocrmypdf(codigo, error)
+            registro().error("El OCR falló (código %s): %s", codigo, mensaje)
+            self._informar("Reconocer texto", mensaje, error=True)
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                operacion = crear_operacion(modo, capas_de_texto(salida, paginas))
+                self.documento.ejecutar(operacion)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar("Reconocer texto", str(e), error=True)
+            return
+        except Exception as e:
+            registro().exception("No se pudo leer el resultado del OCR")
+            self._informar("Reconocer texto", f"No se pudo leer el resultado del OCR ({type(e).__name__}).",
+                           error=True)
+            return
+        self.aviso.hide()
+        n = len(operacion.paginas_afectadas())
+        if modo == ModoOCR.IDENTICO:
+            texto = (f"Texto reconocido en {n} página{'s' if n != 1 else ''}: ya se puede buscar y copiar. "
+                     "El aspecto de las páginas no cambió.")
+        else:
+            texto = f"Texto reconstruido en {n} página{'s' if n != 1 else ''} (experimental): revisalo."
+        self.statusBar().showMessage(texto, 10000)
+
     # ------------------------------------------------------------------ sustitución de fuentes
     def sustituir_fuentes(self, preseleccion: str | None = None) -> bool:
         if self.documento is None:
@@ -897,7 +1023,10 @@ class VentanaPrincipal(QMainWindow):
             partes.append("dependencias")
         if self.faltantes.estado("documento") == "analizando":
             partes.append("fuentes del documento")
-        self.etiqueta_analisis.setText("Analizando " + " y ".join(partes) + "…" if partes else "")
+        texto = "Analizando " + " y ".join(partes) + "…" if partes else ""
+        if self.proceso_ocr.ocupado:
+            texto = (texto + " · " if texto else "") + "Reconociendo texto…"
+        self.etiqueta_analisis.setText(texto)
 
     def chequear_dependencias(self, mostrar: bool = True) -> None:
         """Chequea paquetes y programas en segundo plano (Tesseract puede tardar en responder)."""
@@ -980,7 +1109,8 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_rotar_der, self.acc_rotar_izq, self.acc_buscar, self.acc_acercar,
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
-                  self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir):
+                  self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir,
+                  self.acc_ocr):
             a.setEnabled(hay)
         puede_deshacer = hay and self.documento.puede_deshacer
         puede_rehacer = hay and self.documento.puede_rehacer

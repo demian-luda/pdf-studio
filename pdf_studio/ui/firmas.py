@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 from pdf_studio.core.imagenes import (BibliotecaFirmas, OpcionesFondo, luminancia, quitar_fondo,
                                       umbral_automatico)
 from pdf_studio.ui import iconos
-from pdf_studio.ui.tema import gestor
+from pdf_studio.ui.tema import gestor, marcar_primario
 
 COLORES_TINTA = [("Color original", None), ("Negro", (20, 20, 20)), ("Azul lapicera", (18, 45, 140))]
 LADO_VISTA_PREVIA = 700
@@ -95,7 +95,7 @@ class DialogoQuitarFondo(QDialog):
 
         botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         botones.button(QDialogButtonBox.StandardButton.Ok).setText("Guardar en la biblioteca")
-        botones.button(QDialogButtonBox.StandardButton.Ok).setProperty("primario", True)
+        marcar_primario(botones.button(QDialogButtonBox.StandardButton.Ok))
         botones.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
         botones.accepted.connect(self.aceptar)
         botones.rejected.connect(self.reject)
@@ -155,7 +155,7 @@ class PanelFirmas(QWidget):
         self.lista.currentItemChanged.connect(lambda *_: self._actualizar_botones())
 
         self.b_insertar = QPushButton("Insertar en la página", self)
-        self.b_insertar.setProperty("primario", True)
+        marcar_primario(self.b_insertar)
         self.b_agregar = QPushButton("Agregar firma…", self)
         self.b_fondo = QPushButton("Quitar fondo…", self)
         self.b_eliminar = QPushButton("Eliminar", self)
@@ -176,7 +176,7 @@ class PanelFirmas(QWidget):
         ayuda.setWordWrap(True)
         fila_col = QHBoxLayout()
         self.b_aplicar = QPushButton("Aplicar (Enter)", self.caja_colocacion)
-        self.b_aplicar.setProperty("primario", True)
+        marcar_primario(self.b_aplicar)
         self.b_cancelar = QPushButton("Cancelar (Esc)", self.caja_colocacion)
         iconos.asignar(self.b_aplicar, "check")
         iconos.asignar(self.b_cancelar, "x")

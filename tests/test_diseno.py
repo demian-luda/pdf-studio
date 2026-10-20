@@ -218,3 +218,35 @@ def test_icono_de_boton_primario_contrasta(qapp):
         colores = {img.pixelColor(x, y).name() for x in range(img.width()) for y in range(img.height())
                    if img.pixelColor(x, y).alpha() > 200}
         assert QColor(gestor().paleta.sobre_acento).name() in colores
+
+@pytest.mark.parametrize("tema", ["claro", "oscuro"])
+def test_boton_principal_de_dialogo_usa_el_acento(qtbot, tema):
+    """Los botones de QDialogButtonBox ya vienen «pulidos»: marcar_primario re-aplica el estilo."""
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
+    from pdf_studio.ui.comunes import botonera
+    gestor().set_tema(tema)
+    d = QDialog()
+    qtbot.addWidget(d)
+    QVBoxLayout(d).addWidget(botonera(d, "Aceptar"))
+    d.show()
+    qtbot.waitExposed(d)
+    ok = d.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok)
+    img = ok.grab().toImage()
+    color = img.pixelColor(6, img.height() // 2).name()
+    assert color == gestor().paleta.acento.lower()
+
+
+@pytest.mark.parametrize("tema", ["claro", "oscuro"])
+def test_casillas_y_opciones_se_ven(qtbot, tema):
+    """El contorno de radios y casillas sin marcar contrasta con el fondo (>= 3:1)."""
+    from PySide6.QtWidgets import QRadioButton
+    gestor().set_tema(tema)
+    p = gestor().paleta
+    assert contraste(p.borde_control, p.superficie) >= 3
+    r = QRadioButton("Opción")
+    qtbot.addWidget(r)
+    r.show()
+    qtbot.waitExposed(r)
+    img = r.grab().toImage()
+    colores = {img.pixelColor(x, img.height() // 2).name() for x in range(0, 20)}
+    assert any(contraste(c, p.fondo) >= 2.5 for c in colores)

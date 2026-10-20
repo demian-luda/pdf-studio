@@ -150,6 +150,11 @@ class Documento:
         return self._base
 
     @property
+    def carpeta_trabajo(self) -> Path:
+        """Carpeta temporal privada del documento (se borra al cerrarlo)."""
+        return self._dir_trabajo
+
+    @property
     def contrasena(self) -> str | None:
         return self._contrasena
 

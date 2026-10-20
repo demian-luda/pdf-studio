@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QHeaderView, QLabel, QPlainT
 from pdf_studio.core.fuentes import Embebido, InfoFuente
 from pdf_studio.dependencias.chequeo import Faltante, Importancia
 from pdf_studio.ui import iconos
-from pdf_studio.ui.tema import gestor
+from pdf_studio.ui.tema import gestor, marcar_primario
 
 
 def _color_importancia(imp: Importancia) -> str:
@@ -62,7 +62,7 @@ class TarjetaFaltante(QFrame):
         fila = QHBoxLayout()
         if faltante.instalacion is not None:
             self.boton_instalar = QPushButton("Instalar", self)
-            self.boton_instalar.setProperty("primario", True)
+            marcar_primario(self.boton_instalar)
             iconos.asignar(self.boton_instalar, "download")
             self.boton_instalar.setToolTip("Muestra qué se descarga y pide confirmación antes de instalar")
             self.boton_instalar.clicked.connect(lambda: self.instalar.emit(self.faltante))

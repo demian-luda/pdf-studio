@@ -132,7 +132,8 @@ def comando_archivo(url: str, patrones: tuple[str, ...], titulo: str) -> str:
         '$tmp = Join-Path $env:TEMP ("pdfstudio_" + [guid]::NewGuid().ToString("N"))',
         "New-Item -ItemType Directory -Force -Path $tmp | Out-Null",
         f"Invoke-WebRequest -Uri '{url}' -OutFile \"$tmp\\{nombre_archivo}\"",
-        f'tar -xf "$tmp\\{nombre_archivo}" -C $tmp',
+        # tar.exe de Windows: otro tar en el PATH (como el de Git) confunde «C:» con un servidor
+        f'& "$env:SystemRoot\\System32\\tar.exe" -xf "$tmp\\{nombre_archivo}" -C $tmp',
         f"$archivos = Get-ChildItem -Path $tmp -Recurse -Include {incluir} | "
         "ForEach-Object { [pscustomobject]@{ name = $_.Name; download_url = $_.FullName } }",
     ])

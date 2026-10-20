@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFormLayout, QHBoxLayout, 
 
 from pdf_studio.dependencias.instalador import ErrorInstalacion, Instalacion, formato_tamano
 from pdf_studio.ui import iconos
+from pdf_studio.ui.tema import marcar_primario
 
 
 class DialogoConfirmarInstalacion(QDialog):
@@ -41,7 +42,7 @@ class DialogoConfirmarInstalacion(QDialog):
             aviso.setText("No hace falta ser administrador. Queda disponible sin reiniciar la app.")
 
         self.boton_instalar = QPushButton("Instalar", self)
-        self.boton_instalar.setProperty("primario", True)
+        marcar_primario(self.boton_instalar)
         iconos.asignar(self.boton_instalar, "download")
         self.boton_instalar.clicked.connect(self.accept)
         copiar = QPushButton("Copiar comando", self)
