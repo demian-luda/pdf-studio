@@ -299,6 +299,33 @@ def prueba_formulario(documento, tmp: Path) -> tuple[str, str]:
     return OK, f"{len(lista)} campo(s): completado y aplanado, verificado" + nota
 
 
+def prueba_comparar(documento, tmp: Path) -> tuple[str, str]:
+    """El original contra sí mismo tiene que dar «iguales»; contra una copia con la primera página
+    numerada, tiene que encontrar ese cambio y nada más. Después se arma el informe."""
+    import pymupdf
+
+    from pdf_studio.core import comparar as cp
+    from pdf_studio.core.marcas import NumerarPaginas, OpcionesNumeracion
+    base = documento.ruta_base
+    mismo = _etapa("comparar", lambda: cp.comparar_archivos(base, base, documento.contrasena, documento.contrasena))
+    if not mismo.iguales:
+        raise Fallo("comparar", AssertionError("un documento comparado consigo mismo dio diferencias"))
+    _etapa("editar", lambda: documento.ejecutar(NumerarPaginas([0], OpcionesNumeracion(formato="Página {n} de {total}",
+                                                                                       inicio=777))))
+    editado = tmp / "editado.pdf"
+    _etapa("guardar", lambda: documento.guardar(editado))
+    r = _etapa("comparar", lambda: cp.comparar_archivos(base, editado, documento.contrasena, documento.contrasena))
+    if r.paginas_con_cambios() != [0]:
+        raise Fallo("comparar", AssertionError("aparecieron cambios en páginas que no se tocaron"))
+    if not any(c.tipo == "agregado" and "777" in c.texto for c in r.cambios):
+        raise Fallo("comparar", AssertionError("no se detectó el texto agregado"))
+    informe = tmp / "informe.pdf"
+    paginas = _etapa("informe", lambda: cp.exportar_informe(r, base, editado, informe, documento.contrasena,
+                                                            documento.contrasena))
+    _etapa("releer informe", lambda: pymupdf.open(informe).close())
+    return OK, f"igual consigo mismo; cambio detectado solo en la pág. editada; informe de {paginas} pág."
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -308,6 +335,7 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("comprimir", prueba_comprimir),
     ("redacción", prueba_redaccion),
     ("formulario", prueba_formulario),
+    ("comparar", prueba_comparar),
 ]
 
 

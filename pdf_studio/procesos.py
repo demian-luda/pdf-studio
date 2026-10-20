@@ -1,6 +1,7 @@
-"""Tareas pesadas de MuPDF en un proceso aparte (MuPDF no admite hilos y la interfaz no
-se tiene que trabar). Recibe la ruta de un JSON con el pedido y escribe el resultado en
-otro JSON. Nunca escribe contenido del documento en la salida.
+"""Tareas pesadas de MuPDF en un proceso aparte (comprimir, comparar versiones, informe de
+diferencias): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta
+de un JSON con el pedido y escribe el resultado en otro JSON. Nunca escribe contenido del
+documento en la salida estándar.
 
 Uso interno:  python -m pdf_studio.procesos <tarea> <pedido.json> <resultado.json>
               (o PDFStudio.exe --tarea <tarea> <pedido.json> <resultado.json>)
@@ -23,10 +24,18 @@ def _comprimir(pedido: dict) -> dict:
 def _comparar(pedido: dict) -> dict:
     from pdf_studio.core.comparar import comparar_archivos
     return comparar_archivos(Path(pedido["a"]), Path(pedido["b"]), pedido.get("contrasena_a"),
-                             pedido.get("contrasena_b")).a_dict()
+                             pedido.get("contrasena_b"), pedido.get("nombre_a"), pedido.get("nombre_b")).a_dict()
 
 
-TAREAS = {"comprimir": _comprimir, "comparar": _comparar}
+def _informe(pedido: dict) -> dict:
+    from pdf_studio.core.comparar import ResultadoComparacion, exportar_informe
+    paginas = exportar_informe(ResultadoComparacion.desde_dict(pedido["resultado"]), Path(pedido["a"]),
+                               Path(pedido["b"]), Path(pedido["destino"]), pedido.get("contrasena_a"),
+                               pedido.get("contrasena_b"))
+    return {"paginas": paginas}
+
+
+TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe}
 
 
 def ejecutar(tarea: str, pedido_json: Path, resultado_json: Path) -> int:

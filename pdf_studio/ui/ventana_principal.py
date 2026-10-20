@@ -26,6 +26,7 @@ from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrm
                                  entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto, parece_escaneado)
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
+from pdf_studio.core.comparar import ResultadoComparacion
 from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
 from pdf_studio.core.formularios import AplanarFormulario, CompletarFormulario, campos, tiene_formulario
 from pdf_studio.core.redaccion import Coincidencia, LimpiarMetadatos, OpcionesRedaccion, Redaccion, Redactar
@@ -44,6 +45,7 @@ from pdf_studio.ui.barra_lateral import BarraLateral
 from pdf_studio.ui.busqueda import BarraBusqueda
 from pdf_studio.ui.cinta import Encabezado
 from pdf_studio.ui.colocacion import ImagenColocable
+from pdf_studio.ui.comparar import DialogoComparar
 from pdf_studio.ui.comunes import BarraAviso
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
@@ -88,6 +90,8 @@ class VentanaPrincipal(QMainWindow):
         self._tarea: tuple | None = None          # (nombre, archivo de resultado, función al terminar)
         self._progreso_tarea: QProgressDialog | None = None
         self.redaccion_pendiente = Redaccion()     # zonas marcadas, todavía sin aplicar
+        self._comparacion: DialogoComparar | None = None
+        self._carpeta_tareas: Path | None = None   # para tareas sin documento abierto
         self.setWindowTitle(NOMBRE_APP)
         self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
@@ -329,6 +333,9 @@ class VentanaPrincipal(QMainWindow):
                                     grupo=H, tip="Hace buscable y copiable el texto de páginas escaneadas.")
         self.acc_comprimir = self._accion("Comprimir…", "shrink", None, self.comprimir, grupo=H,
                                           tip="Crea una copia más liviana y muestra el tamaño antes y después.")
+        self.acc_comparar = self._accion("Comparar versiones…", "git-compare", "Ctrl+Shift+C", self.comparar_versiones,
+                                         grupo=H, tip="Dos PDFs lado a lado: texto agregado y quitado, diferencias "
+                                                      "visuales e informe en PDF.", corto="Comparar")
         self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.chequear_dependencias,
                                          grupo=H)
         self.acc_paleta = self._accion("Paleta de comandos", "command", "Ctrl+K", self.abrir_paleta, grupo=H,
@@ -401,8 +408,8 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_numerar):
             paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_ocr, self.acc_comprimir, self.acc_borrar_metadatos, None, self.acc_sustituir,
-                  self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
+        for a in (self.acc_ocr, self.acc_comprimir, self.acc_borrar_metadatos, self.acc_comparar, None,
+                  self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
         enc.pestanas.setCurrentIndex(1)       # arranca en "Editar"
@@ -583,6 +590,23 @@ class VentanaPrincipal(QMainWindow):
         d = DialogoAplicarRedaccion(redaccion, self)
         return (d.opciones, d.borrar_metadatos) if d.exec() else None
 
+    def _pedir_ruta_comparar(self, titulo: str = "Elegir la versión para comparar") -> str | None:
+        carpeta = str(self.documento.ruta_original.parent) if self.documento is not None else ""
+        ruta, _ = QFileDialog.getOpenFileName(self, titulo, carpeta, "Documentos PDF (*.pdf)")
+        return ruta or None
+
+    def _mostrar_comparacion(self, resultado: ResultadoComparacion, ruta_a: Path, ruta_b: Path,
+                             contrasena_a: str | None, contrasena_b: str | None) -> None:
+        if self._comparacion is not None:
+            self._comparacion.close()
+        dialogo = DialogoComparar(resultado, ruta_a, ruta_b, contrasena_a, contrasena_b, self)
+        dialogo.exportar.connect(lambda: self.exportar_informe(resultado, ruta_a, ruta_b, contrasena_a,
+                                                               contrasena_b))
+        dialogo.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialogo.destroyed.connect(lambda *_: setattr(self, "_comparacion", None))
+        self._comparacion = dialogo
+        dialogo.show()
+
     def _confirmar_instalacion(self, inst: Instalacion) -> bool:
         return bool(DialogoConfirmarInstalacion(inst, self).exec())
 
@@ -707,6 +731,8 @@ class VentanaPrincipal(QMainWindow):
         self.analizador.cancelar()
         self.cancelar_ocr()
         self.cancelar_tarea()
+        if self._comparacion is not None:
+            self._comparacion.close()       # puede estar mostrando archivos de la carpeta de trabajo
         self.aviso.hide()
         self.redaccion_pendiente = Redaccion()
         self.visor.mostrar_redaccion([])
@@ -738,6 +764,10 @@ class VentanaPrincipal(QMainWindow):
             self.analizador.cancelar()
             self.proceso_ocr.cancelar()
             self.proceso_tarea.cancelar()
+            if self._comparacion is not None:
+                self._comparacion.close()
+            if self._carpeta_tareas is not None:
+                shutil.rmtree(self._carpeta_tareas, ignore_errors=True)
             for hilo in list(self._hilos):
                 hilo.wait(10_000)       # no destruir hilos en marcha
             evento.accept()
@@ -1254,9 +1284,9 @@ class VentanaPrincipal(QMainWindow):
     def iniciar_tarea(self, tarea: str, pedido: dict, titulo: str, texto: str, al_terminar) -> bool:
         """Corre una tarea de pdf_studio.procesos sin trabar la interfaz.
         al_terminar(ok, resultado o mensaje de error)."""
-        if self.documento is None or self.proceso_tarea.ocupado:
+        if self.proceso_tarea.ocupado:
             return False
-        carpeta = self.documento.carpeta_trabajo
+        carpeta = self.documento.carpeta_trabajo if self.documento is not None else self._carpeta_sin_documento()
         archivo_pedido, archivo_resultado = carpeta / f"{tarea}_pedido.json", carpeta / f"{tarea}_resultado.json"
         archivo_resultado.unlink(missing_ok=True)
         archivo_pedido.write_text(json.dumps(pedido), encoding="utf-8")
@@ -1266,6 +1296,12 @@ class VentanaPrincipal(QMainWindow):
         self._progreso_tarea = self._mostrar_progreso(titulo, texto, self.cancelar_tarea)
         self._estado_analisis()
         return True
+
+    def _carpeta_sin_documento(self) -> Path:
+        import tempfile
+        if self._carpeta_tareas is None or not self._carpeta_tareas.is_dir():
+            self._carpeta_tareas = Path(tempfile.mkdtemp(prefix="pdfstudio_tareas_"))
+        return self._carpeta_tareas
 
     def cancelar_tarea(self) -> None:
         if self.proceso_tarea.cancelar():
@@ -1362,6 +1398,87 @@ class VentanaPrincipal(QMainWindow):
             self._informar("Comprimir", f"No se pudo escribir {destino}: {e}", error=True)
             return
         self.statusBar().showMessage(f"Copia comprimida guardada: {destino}", 8000)
+
+    # ------------------------------------------------------------------ comparar versiones
+    def _pedir_pdf_para_comparar(self, titulo: str) -> tuple[Path, str | None] | None:
+        """Pide un PDF y, si está protegido, su contraseña. None si el usuario canceló."""
+        from pdf_studio.core.comparar import abrir
+        ruta = self._pedir_ruta_comparar(titulo)
+        if not ruta:
+            return None
+        ruta = Path(ruta)
+        contrasena, intento = None, 0
+        while True:
+            try:
+                abrir(ruta, contrasena).close()
+                return ruta, contrasena
+            except ErrorDocumento as e:
+                if "contraseña" not in str(e):
+                    self._informar("Comparar versiones", str(e), error=True)
+                    return None
+                contrasena = self._pedir_contrasena(ruta.name, intento)
+                intento += 1
+                if contrasena is None:
+                    return None
+
+    def comparar_versiones(self) -> bool:
+        """Compara el documento abierto (tal como está, con sus cambios) contra otro PDF. Sin
+        documento abierto, pide los dos archivos."""
+        if self.documento is not None:
+            ruta_a = self._preparar_estado_actual()
+            if ruta_a is None:
+                return False
+            contrasena_a = self.documento.contrasena
+            nombre_a = self.documento.ruta_original.name
+            if self.documento.operaciones_activas:
+                nombre_a += " (con cambios sin guardar)"
+        else:
+            elegido = self._pedir_pdf_para_comparar("Elegir la versión A (antes)")
+            if elegido is None:
+                return False
+            (ruta_a, contrasena_a), nombre_a = elegido, elegido[0].name
+        elegido = self._pedir_pdf_para_comparar("Elegir la versión B (para comparar)")
+        if elegido is None:
+            return False
+        ruta_b, contrasena_b = elegido
+        pedido = {"a": str(ruta_a), "b": str(ruta_b), "contrasena_a": contrasena_a, "contrasena_b": contrasena_b,
+                  "nombre_a": nombre_a, "nombre_b": ruta_b.name}
+
+        def listo(ok: bool, resultado) -> None:
+            if not ok:
+                self._informar("Comparar versiones", resultado, error=True)
+                return
+            resultado = ResultadoComparacion.desde_dict(resultado)
+            self.statusBar().showMessage(resultado.resumen(), 10000)
+            self._mostrar_comparacion(resultado, Path(ruta_a), ruta_b, contrasena_a, contrasena_b)
+
+        return self.iniciar_tarea("comparar", pedido, "Comparar versiones",
+                                  "Comparando el texto y el aspecto de cada página…", listo)
+
+    def exportar_informe(self, resultado: ResultadoComparacion, ruta_a: Path, ruta_b: Path,
+                         contrasena_a: str | None = None, contrasena_b: str | None = None) -> bool:
+        base = Path(ruta_b).with_name(f"{Path(ruta_b).stem}_diferencias.pdf")
+        ruta = self._pedir_ruta_guardar(base)
+        if not ruta:
+            return False
+        destino = Path(ruta).with_suffix(".pdf")
+        if destino.resolve() in (Path(ruta_a).resolve(), Path(ruta_b).resolve()) or (
+                self.documento is not None and destino.resolve() == self.documento.ruta_original):
+            self._informar("Exportar informe", "Elegiste uno de los documentos comparados: el informe se "
+                                               "guarda con otro nombre.", error=True)
+            return False
+        pedido = {"resultado": resultado.a_dict(), "a": str(ruta_a), "b": str(ruta_b), "destino": str(destino),
+                  "contrasena_a": contrasena_a, "contrasena_b": contrasena_b}
+
+        def listo(ok: bool, datos) -> None:
+            if not ok:
+                self._informar("Exportar informe", datos, error=True)
+                return
+            self._informar("Exportar informe", f"Se guardó el informe de diferencias ({datos['paginas']} "
+                                               f"páginas):\n{destino}")
+
+        return self.iniciar_tarea("informe", pedido, "Exportar informe", "Armando el informe de diferencias…",
+                                  listo)
 
     # ------------------------------------------------------------------ OCR
     def reconocer_texto(self) -> bool:
