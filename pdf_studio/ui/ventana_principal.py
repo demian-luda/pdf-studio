@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog
 from pdf_studio import NOMBRE_APP, __version__
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado
-from pdf_studio.core.fuentes import indice_incluidas, indice_sistema
+from pdf_studio.core.fuentes import familia_de, indice_incluidas, indice_sistema
+from pdf_studio.core.sustitucion import PlanSustitucion
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.paginas import RotarPagina
@@ -27,6 +28,7 @@ from pdf_studio.ui.busqueda import BarraBusqueda
 from pdf_studio.ui.colocacion import ImagenColocable
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
+from pdf_studio.ui.sustitucion import DialogoSustitucion
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.panel_faltantes import PanelFaltantes
@@ -154,6 +156,9 @@ class VentanaPrincipal(QMainWindow):
         self.acc_pag_sig = self._accion("Página siguiente", "PgDown",
                                         lambda: self.visor.ir_a_pagina(self.visor.pagina_actual + 1))
         self.acc_chequear = self._accion("Verificar dependencias", None, self.chequear_dependencias)
+        self.acc_sustituir = self._accion("Reemplazar fuente en todo el documento…", None,
+                                          lambda: self.sustituir_fuentes(),
+                                          tip="Modo armónico: reemplaza una fuente en todo el documento.")
         self.acc_ver_faltantes = self.dock_faltantes.toggleViewAction()
         self.acc_ver_faltantes.setText("Panel de faltantes")
         self.acc_ver_miniaturas = self.dock_miniaturas.toggleViewAction()
@@ -178,6 +183,7 @@ class VentanaPrincipal(QMainWindow):
             m.addSeparator() if a is None else m.addAction(a)
         m = self.menuBar().addMenu("&Herramientas")
         m.addAction(self.acc_buscar)
+        m.addAction(self.acc_sustituir)
         m.addAction(self.acc_chequear)
         m = self.menuBar().addMenu("A&yuda")
         m.addAction(self.acc_acerca)
@@ -206,6 +212,7 @@ class VentanaPrincipal(QMainWindow):
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
         self.faltantes.rechequear.connect(self.chequear_dependencias)
+        self.faltantes.reemplazar_fuente.connect(lambda nombre: self.sustituir_fuentes(nombre or None))
         self.visor.texto_clic.connect(self._texto_clic)
         self.visor.texto_doble_clic.connect(self._texto_doble_clic)
         self.visor.seleccion_movida.connect(self.mover_seleccion)
@@ -251,6 +258,17 @@ class VentanaPrincipal(QMainWindow):
                                      lambda: indice_sistema().cargar(), self)
         if dialogo.exec() and dialogo.opcion_elegida() is not None:
             return dialogo.texto, dialogo.opcion_elegida()
+        return None
+
+    def _dialogo_sustitucion(self, preseleccion: str | None) -> PlanSustitucion | None:
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            dialogo = DialogoSustitucion(self.documento.doc, indice_incluidas(), indice_sistema(),
+                                         familia_de(preseleccion) if preseleccion else None, self)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if dialogo.exec() and dialogo.plan is not None and dialogo.plan.operacion is not None:
+            return dialogo.plan
         return None
 
     def _confirmar_avisos(self, avisos: list[str]) -> bool:
@@ -562,6 +580,30 @@ class VentanaPrincipal(QMainWindow):
         self.panel_firmas.set_colocando(False)
         self.statusBar().clearMessage()
 
+    # ------------------------------------------------------------------ sustitución de fuentes
+    def sustituir_fuentes(self, preseleccion: str | None = None) -> bool:
+        if self.documento is None:
+            return False
+        plan = self._dialogo_sustitucion(preseleccion)
+        if plan is None:
+            return False
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.documento.ejecutar(plan.operacion)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar("Reemplazar fuente", str(e), error=True)
+            return False
+        detalle = plan.resumen()
+        if plan.ajustes:
+            detalle += "\n\nLíneas con más ajuste:\n" + "\n".join(
+                f"• Página {a.pagina + 1}: {a.porcentaje:+.1f}% «{a.texto[:50]}»" for a in plan.ajustes[:10])
+        self._informar("Reemplazar fuente", detalle)
+        self._chequear_fuentes_documento()
+        return True
+
     # ------------------------------------------------------------------ edición de texto
     @property
     def nivel_texto(self) -> str:
@@ -678,7 +720,7 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_rotar_der, self.acc_rotar_izq, self.acc_buscar, self.acc_acercar,
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
-                  self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion):
+                  self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir):
             a.setEnabled(hay)
         self.acc_deshacer.setEnabled(hay and self.documento.puede_deshacer)
         self.acc_rehacer.setEnabled(hay and self.documento.puede_rehacer)

@@ -72,6 +72,7 @@ class TarjetaFaltante(QFrame):
 
 class PanelFaltantes(QWidget):
     rechequear = Signal()
+    reemplazar_fuente = Signal(str)     # nombre de la fuente del PDF (vacío = elegir en el diálogo)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -108,7 +109,17 @@ class PanelFaltantes(QWidget):
             self.tabla.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         self.tabla.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla.verticalHeader().setVisible(False)
-        self.pestanas.addTab(self.tabla, "Fuentes del documento")
+        self.tabla.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        pagina_fuentes = QWidget()
+        capa_fuentes = QVBoxLayout(pagina_fuentes)
+        capa_fuentes.setContentsMargins(0, 0, 0, 0)
+        capa_fuentes.addWidget(self.tabla, 1)
+        self.boton_reemplazar = QPushButton("Reemplazar fuente en todo el documento…", pagina_fuentes)
+        self.boton_reemplazar.setToolTip("Para PDFs con fuentes privadas o recortadas: deja el documento uniforme "
+                                         "y editable con una fuente libre equivalente.")
+        self.boton_reemplazar.clicked.connect(self._pedir_reemplazo)
+        capa_fuentes.addWidget(self.boton_reemplazar)
+        self.pestanas.addTab(pagina_fuentes, "Fuentes del documento")
 
         capa = QVBoxLayout(self)
         capa.setContentsMargins(4, 4, 4, 4)
@@ -148,6 +159,11 @@ class PanelFaltantes(QWidget):
             if necesarios:
                 texto += f", {necesarios} necesario(s)"
             self.resumen.setText(texto + ". Copiá el comando y pegalo en PowerShell.")
+
+    def _pedir_reemplazo(self) -> None:
+        fila = self.tabla.currentRow()
+        item = self.tabla.item(fila, 0) if fila >= 0 else None
+        self.reemplazar_fuente.emit(item.text() if item is not None else "")
 
     def _llenar_tabla(self, fuentes: list[InfoFuente]) -> None:
         self.tabla.setRowCount(len(fuentes))
