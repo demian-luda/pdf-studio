@@ -31,6 +31,7 @@ class Modo(Enum):
     RESALTAR = "resaltar"
     NOTA = "nota"
     TEXTO = "texto"
+    REDACTAR = "redactar"
 
 
 def pixmap_a_qimage(pix: pymupdf.Pixmap) -> QImage:
@@ -105,6 +106,8 @@ class Visor(QGraphicsView):
         self._resultados: list[tuple[int, pymupdf.Rect]] = []
         self._resultado_actual = -1
         self._marcas: list[QGraphicsRectItem] = []
+        self._redaccion: list[tuple[int, pymupdf.Rect]] = []        # zonas marcadas, aún sin aplicar
+        self._marcas_redaccion: list[QGraphicsRectItem] = []
         self._pagina_actual = 0
         self._modo = Modo.MANO
         self._inicio_seleccion: QPointF | None = None
@@ -147,6 +150,7 @@ class Visor(QGraphicsView):
         escena.clear()
         self.items = []
         self._marcas = []
+        self._marcas_redaccion = []       # escena.clear() ya las borró
         self._rect_seleccion = None
         self.seleccion = None      # el documento cambió: la selección de texto ya no vale
         if self.documento is None:
@@ -164,6 +168,7 @@ class Visor(QGraphicsView):
             y += r.height + SEPARACION
         escena.setSceneRect(QRectF(0, 0, ancho_max + 2 * SEPARACION, y))
         self._dibujar_resultados()
+        self._dibujar_redaccion()
         if colocacion is not None:
             escena.addItem(colocacion)
             colocacion.restaurar(estado)
@@ -364,6 +369,7 @@ class Visor(QGraphicsView):
         self._resultados = resultados
         self._resultado_actual = actual
         self._dibujar_resultados()
+        self._dibujar_redaccion()
         if 0 <= actual < len(resultados):
             pagina, rect = resultados[actual]
             self.ensureVisible(self.a_escena(pagina, rect), 60, 120)
@@ -385,6 +391,33 @@ class Visor(QGraphicsView):
             marca.setZValue(10)
             self.scene().addItem(marca)
             self._marcas.append(marca)
+
+    # ------------------------------------------------------------------ redacción pendiente
+    def mostrar_redaccion(self, zonas: list[tuple[int, pymupdf.Rect]]) -> None:
+        """Zonas marcadas para redactar (todavía no aplicadas): contorno y rayado en rojo."""
+        self._redaccion = list(zonas)
+        self._dibujar_redaccion()
+
+    def _dibujar_redaccion(self) -> None:
+        for m in self._marcas_redaccion:
+            if m.scene() is not None:
+                self.scene().removeItem(m)
+        self._marcas_redaccion = []
+        if self.documento is None:
+            return
+        rojo = QColor(gestor().paleta.peligro)
+        for pagina, rect in self._redaccion:
+            if pagina >= len(self.items):
+                continue
+            marca = QGraphicsRectItem(self.a_escena(pagina, rect))
+            marca.setPen(QPen(rojo, 0, Qt.PenStyle.DashLine))
+            relleno = QColor(rojo)
+            relleno.setAlpha(60)
+            marca.setBrush(QBrush(relleno, Qt.BrushStyle.BDiagPattern))
+            marca.setZValue(15)
+            marca.setToolTip("Marcado para redactar (todavía no se aplicó)")
+            self.scene().addItem(marca)
+            self._marcas_redaccion.append(marca)
 
     # ------------------------------------------------------------------ selección de texto
     def mostrar_seleccion(self, pagina: int, rect: pymupdf.Rect) -> None:
@@ -461,16 +494,18 @@ class Visor(QGraphicsView):
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             cursor = (Qt.CursorShape.IBeamCursor if modo in (Modo.RESALTAR, Modo.TEXTO)
+                      else Qt.CursorShape.CrossCursor if modo == Modo.REDACTAR
                       else Qt.CursorShape.PointingHandCursor)
             self.viewport().setCursor(cursor)
         if modo != Modo.TEXTO:
             self.limpiar_seleccion()
 
     def mousePressEvent(self, evento) -> None:
-        if self._modo == Modo.RESALTAR and evento.button() == Qt.MouseButton.LeftButton:
+        if self._modo in (Modo.RESALTAR, Modo.REDACTAR) and evento.button() == Qt.MouseButton.LeftButton:
             self._inicio_seleccion = self.mapToScene(evento.position().toPoint())
             self._rect_seleccion = QGraphicsRectItem(QRectF(self._inicio_seleccion, self._inicio_seleccion))
-            acento = QColor(gestor().paleta.acento)
+            paleta = gestor().paleta
+            acento = QColor(paleta.peligro if self._modo == Modo.REDACTAR else paleta.acento)
             self._rect_seleccion.setPen(QPen(acento, 0))
             relleno = QColor(acento)
             relleno.setAlpha(40)

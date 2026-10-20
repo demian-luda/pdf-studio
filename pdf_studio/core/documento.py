@@ -73,6 +73,12 @@ class Operacion:
     def descripcion(self) -> str:
         return self.nombre
 
+    def verificar_guardado(self, ruta: Path, contrasena: str | None, paginas: dict[int, int]) -> list[str]:
+        """Chequeos propios sobre el archivo guardado (p. ej. que la redacción sea real).
+        `paginas`: {índice al aplicar la operación: índice en el archivo guardado}.
+        Devuelve los problemas encontrados (vacío = todo bien)."""
+        return []
+
 
 @dataclass
 class Guardado:
@@ -84,13 +90,15 @@ class Guardado:
     estructura_ok: bool
     fidelidad: ResultadoFidelidad
     avisos: list[str] = field(default_factory=list)
+    problemas: list[str] = field(default_factory=list)     # verificaciones propias de las operaciones
 
     @property
     def es_fiel(self) -> bool:
-        return self.fidelidad.ok and self.estructura_ok
+        return self.fidelidad.ok and self.estructura_ok and not self.problemas
 
     def resumen(self) -> str:
-        lineas = [self.fidelidad.resumen()]
+        lineas = [f"¡Atención! {p}" for p in self.problemas]
+        lineas.append(self.fidelidad.resumen())
         if self.incremental:
             if self.bytes_originales_intactos:
                 lineas.append("Guardado incremental: el contenido original quedó intacto y solo se "
@@ -329,7 +337,31 @@ class Documento:
         fidelidad = comparar_documentos(self._base, salida, self.mapa_paginas(),
                                         contrasena=self._contrasena, progreso=progreso,
                                         parciales=parciales)
-        return Guardado(salida, incremental, intactos, estructura_ok, fidelidad, avisos)
+        problemas = []
+        for op, paginas in zip(ops, self._paginas_hasta_el_final()):
+            try:
+                problemas.extend(op.verificar_guardado(salida, self._contrasena, paginas))
+            except Exception as e:
+                problemas.append(f"No se pudo verificar «{op.descripcion()}» ({type(e).__name__}).")
+        return Guardado(salida, incremental, intactos, estructura_ok, fidelidad, avisos, problemas)
+
+    def _paginas_hasta_el_final(self) -> list[dict[int, int]]:
+        """Para cada operación activa: {índice de página al aplicarla: índice al final}
+        (las páginas que una operación posterior borró no aparecen)."""
+        ops = self.operaciones_activas
+        totales = [self.paginas_original]
+        for op in ops:
+            r = op.reubicar(totales[-1])
+            totales.append(r[1] if r is not None else totales[-1])
+        resultado = []
+        for i in range(len(ops)):
+            mapa = {p: p for p in range(totales[i + 1])}
+            for j in range(i + 1, len(ops)):
+                r = ops[j].reubicar(totales[j])
+                if r is not None:
+                    mapa = {k: r[0][v] for k, v in mapa.items() if v in r[0]}
+            resultado.append(mapa)
+        return resultado
 
     def confirmar_guardado(self, guardado: Guardado, destino: str | Path,
                            sobrescribir_original: bool = False) -> Path:

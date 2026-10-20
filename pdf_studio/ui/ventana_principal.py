@@ -27,6 +27,8 @@ from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrm
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
+from pdf_studio.core.formularios import AplanarFormulario, CompletarFormulario, campos, tiene_formulario
+from pdf_studio.core.redaccion import Coincidencia, LimpiarMetadatos, OpcionesRedaccion, Redaccion, Redactar
 from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePDF, InsertarPaginasEnBlanco,
                                      ReordenarPaginas, RotarPagina, extraer_paginas, mover_paginas,
                                      nombres_libres)
@@ -46,6 +48,7 @@ from pdf_studio.ui.comunes import BarraAviso
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
+from pdf_studio.ui.formulario import PanelFormulario
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.ocr import DialogoOCR
@@ -54,6 +57,7 @@ from pdf_studio.ui.paginas import (DialogoComprimir, DialogoExtraer, DialogoInse
 from pdf_studio.ui.paleta_comandos import PaletaComandos
 from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo, ProcesoExterno
 from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
+from pdf_studio.ui.redaccion import DialogoAplicarRedaccion, DialogoBuscarRedactar
 from pdf_studio.ui.sustitucion import DialogoSustitucion
 from pdf_studio.ui.tema import gestor
 from pdf_studio.ui.visor import Modo, Visor
@@ -83,6 +87,7 @@ class VentanaPrincipal(QMainWindow):
         self.proceso_tarea.terminado.connect(self._tarea_terminada)
         self._tarea: tuple | None = None          # (nombre, archivo de resultado, función al terminar)
         self._progreso_tarea: QProgressDialog | None = None
+        self.redaccion_pendiente = Redaccion()     # zonas marcadas, todavía sin aplicar
         self.setWindowTitle(NOMBRE_APP)
         self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
@@ -108,6 +113,7 @@ class VentanaPrincipal(QMainWindow):
         self.miniaturas = PanelMiniaturas(self)
         self.panel_fuentes = PanelFuentes(self)
         self.faltantes = PanelFaltantes(self)
+        self.panel_formulario = PanelFormulario(self)
         self.lateral = BarraLateral(self)
         self.dock_lateral = QDockWidget("Barra lateral", self)
         self.dock_lateral.setObjectName("dock_lateral")
@@ -145,6 +151,7 @@ class VentanaPrincipal(QMainWindow):
         self.lateral.agregar("paginas", "Páginas", "files", self.miniaturas)
         self.lateral.agregar("fuentes", "Fuentes del documento", "type", self.panel_fuentes)
         self.lateral.agregar("faltantes", "Faltantes", "package-search", self.faltantes)
+        self.lateral.agregar("formulario", "Formulario", "form-input", self.panel_formulario)
         self._conectar()
         gestor().cambio.connect(self._tema_cambio)
         self._actualizar_estado()
@@ -247,7 +254,29 @@ class VentanaPrincipal(QMainWindow):
                                               "Arrastrá sobre el texto para resaltarlo.", E)
         self.acc_modo_nota = self._accion("Nota", "sticky-note", "Ctrl+Shift+N", lambda: self.set_modo(Modo.NOTA),
                                           True, "Hacé clic donde quieras dejar una nota.", E)
-        for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, self.acc_modo_texto):
+        self.acc_modo_redactar = self._accion("Marcar para redactar", "square-dashed", "Ctrl+Shift+D",
+                                              lambda: self.set_modo(Modo.REDACTAR), True,
+                                              "Arrastrá sobre lo que quieras eliminar del archivo; después, "
+                                              "«Aplicar redacción».", E, corto="Marcar zona")
+        self.acc_buscar_redactar = self._accion("Buscar datos para redactar…", "text-search", None,
+                                                self.buscar_para_redactar, grupo=E,
+                                                tip="DNI, CUIT/CUIL, CBU, correos, teléfonos o el texto que "
+                                                    "quieras.", corto="Buscar datos")
+        self.acc_aplicar_redaccion = self._accion("Aplicar redacción…", "ban", None, self.aplicar_redaccion,
+                                                  grupo=E, tip="Elimina del archivo (no solo tapa) lo marcado.",
+                                                  corto="Aplicar")
+        self.acc_descartar_redaccion = self._accion("Descartar marcas de redacción", "x", None,
+                                                    self.descartar_redaccion, grupo=E)
+        self.acc_formulario = self._accion("Completar formulario", "form-input", None,
+                                           lambda: self.mostrar_lateral("formulario"), grupo=E,
+                                           tip="Muestra los campos del formulario en la barra lateral.",
+                                           corto="Formulario")
+        self.acc_aplanar = self._accion("Aplanar formulario…", "layers", None, self.aplanar_formulario, grupo=E,
+                                        tip="Convierte los campos en contenido fijo.", corto="Aplanar")
+        self.acc_borrar_metadatos = self._accion("Borrar metadatos", "brush-cleaning", None, self.borrar_metadatos,
+                                                 grupo=H, tip="Quita autor, título, programas y fechas del archivo.")
+        for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, self.acc_modo_texto,
+                  self.acc_modo_redactar):
             self.grupo_modo.addAction(a)
         self.acc_modo_mano.setChecked(True)
         self.acc_firmas = self._accion("Firmas", "signature", "Ctrl+Shift+F", self.mostrar_firmas, grupo=F,
@@ -360,7 +389,8 @@ class VentanaPrincipal(QMainWindow):
         self.combo_nivel.setAccessibleName("Nivel de selección de texto")
         editar.addWidget(self.combo_nivel)
         for a in (self.acc_editar_seleccion, None, self.acc_modo_resaltar, self.acc_modo_nota, None,
-                  self.acc_sustituir):
+                  self.acc_sustituir, None, self.acc_modo_redactar, self.acc_buscar_redactar,
+                  self.acc_aplicar_redaccion, None, self.acc_formulario, self.acc_aplanar):
             editar.addSeparator() if a is None else editar.addAction(a)
         firmar = enc.agregar_pestana("Firmar")
         for a in (self.acc_firmas, self.acc_insertar_imagen):
@@ -371,8 +401,8 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_numerar):
             paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_ocr, self.acc_comprimir, None, self.acc_sustituir, self.acc_chequear, None,
-                  self.acc_paleta, self.acc_acerca):
+        for a in (self.acc_ocr, self.acc_comprimir, self.acc_borrar_metadatos, None, self.acc_sustituir,
+                  self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
         enc.pestanas.setCurrentIndex(1)       # arranca en "Editar"
@@ -382,7 +412,10 @@ class VentanaPrincipal(QMainWindow):
     def _conectar(self) -> None:
         self.visor.pagina_actual_cambio.connect(self._pagina_cambio)
         self.visor.zoom_cambio.connect(lambda z: self.etiqueta_zoom.setText(f"{z * 100:.0f}%"))
-        self.visor.rect_seleccionado.connect(self._resaltar_en)
+        self.visor.rect_seleccionado.connect(self._rect_en)
+        self.panel_formulario.aplicar.connect(self.completar_formulario)
+        self.panel_formulario.aplanar.connect(self.aplanar_formulario)
+        self.panel_formulario.ir_a.connect(self._ir_a_campo)
         self.visor.punto_clic.connect(self._nota_en)
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
         self.miniaturas.paginas_movidas.connect(self.mover_paginas)
@@ -542,6 +575,14 @@ class VentanaPrincipal(QMainWindow):
     def _dialogo_resultado_compresion(self, resultado: ResultadoCompresion) -> bool:
         return bool(DialogoResultadoCompresion(resultado, self).exec())
 
+    def _dialogo_buscar_redactar(self) -> list[Coincidencia] | None:
+        d = DialogoBuscarRedactar(self.documento.doc, self)
+        return d.elegidas if d.exec() else None
+
+    def _dialogo_aplicar_redaccion(self, redaccion: Redaccion) -> tuple[OpcionesRedaccion, bool] | None:
+        d = DialogoAplicarRedaccion(redaccion, self)
+        return (d.opciones, d.borrar_metadatos) if d.exec() else None
+
     def _confirmar_instalacion(self, inst: Instalacion) -> bool:
         return bool(DialogoConfirmarInstalacion(inst, self).exec())
 
@@ -630,6 +671,12 @@ class VentanaPrincipal(QMainWindow):
         self._chequear_fuentes_documento()
         self._actualizar_estado()
         self.statusBar().showMessage(f"Abierto: {ruta.name} ({documento.doc.page_count} páginas)", 5000)
+        self._actualizar_formulario()
+        if tiene_formulario(documento.doc):
+            n = len(self.panel_formulario.campos)
+            self.mostrar_aviso(f"Este PDF tiene un formulario con {n} campo{'s' if n != 1 else ''}. Podés "
+                               "completarlo desde la barra lateral.", "Completar…",
+                               lambda: self.mostrar_lateral("formulario"), "form-input")
         if parece_escaneado(documento.doc):
             self.mostrar_aviso("Este PDF parece escaneado: sus páginas son imágenes sin texto. Con el OCR "
                                "podés buscar, seleccionar y copiar el texto, sin que cambie su aspecto.",
@@ -661,6 +708,9 @@ class VentanaPrincipal(QMainWindow):
         self.cancelar_ocr()
         self.cancelar_tarea()
         self.aviso.hide()
+        self.redaccion_pendiente = Redaccion()
+        self.visor.mostrar_redaccion([])
+        self.panel_formulario.set_campos([])
         self.faltantes.set_estado("documento", None)
         self._estado_analisis()
         self.visor.set_documento(None)
@@ -788,9 +838,16 @@ class VentanaPrincipal(QMainWindow):
     def set_modo(self, modo: Modo) -> None:
         self.visor.set_modo(modo)
         {Modo.MANO: self.acc_modo_mano, Modo.RESALTAR: self.acc_modo_resaltar,
-         Modo.NOTA: self.acc_modo_nota, Modo.TEXTO: self.acc_modo_texto}[modo].setChecked(True)
+         Modo.NOTA: self.acc_modo_nota, Modo.TEXTO: self.acc_modo_texto,
+         Modo.REDACTAR: self.acc_modo_redactar}[modo].setChecked(True)
         if modo != Modo.TEXTO:
             self.bloque = None
+
+    def _rect_en(self, pagina: int, rect) -> None:
+        if self.visor.modo == Modo.REDACTAR:
+            self.marcar_para_redactar(pagina, rect)
+        else:
+            self._resaltar_en(pagina, rect)
 
     def _resaltar_en(self, pagina: int, rect) -> None:
         if self.documento is None:
@@ -1068,6 +1125,121 @@ class VentanaPrincipal(QMainWindow):
             return False
         op = self._dialogo_numeracion()
         return op is not None and self._ejecutar("Numerar páginas", op)
+
+    # ------------------------------------------------------------------ redacción
+    def _mostrar_redaccion_pendiente(self) -> None:
+        r = self.redaccion_pendiente
+        zonas = [(p, pymupdf.Rect(z)) for p, lista in r.zonas.items() for z in lista]
+        zonas += [(p, pymupdf.Rect(z)) for p, lista in r.cajas_extra.items() for z in lista]
+        self.visor.mostrar_redaccion(zonas)
+        if r.vacia:
+            self.aviso.hide()
+            return
+        n = len(zonas)
+        self.mostrar_aviso(f"{n} elemento{'s' if n != 1 else ''} marcado{'s' if n != 1 else ''} para redactar "
+                           "(todavía no se borró nada).", "Aplicar redacción…", self.aplicar_redaccion, "ban")
+        self._actualizar_estado()
+
+    def marcar_para_redactar(self, pagina: int, rect) -> None:
+        if self.documento is None:
+            return
+        rect = pymupdf.Rect(rect)
+        if rect.width < 2 or rect.height < 2:
+            return
+        self.redaccion_pendiente.agregar_zona(pagina, rect)
+        self._mostrar_redaccion_pendiente()
+
+    def buscar_para_redactar(self) -> bool:
+        if self.documento is None:
+            return False
+        elegidas = self._dialogo_buscar_redactar()
+        if not elegidas:
+            return False
+        for c in elegidas:
+            self.redaccion_pendiente.agregar(c)
+        self._mostrar_redaccion_pendiente()
+        primera = min(elegidas, key=lambda c: c.pagina)
+        self.visor.ir_a_pagina(primera.pagina)
+        return True
+
+    def descartar_redaccion(self) -> None:
+        self.redaccion_pendiente = Redaccion()
+        self._mostrar_redaccion_pendiente()
+
+    def aplicar_redaccion(self) -> bool:
+        if self.documento is None:
+            return False
+        if self.redaccion_pendiente.vacia:
+            self._informar("Aplicar redacción", "No hay nada marcado. Usá «Marcar para redactar» (arrastrá sobre "
+                                                "la página) o «Buscar datos para redactar».")
+            return False
+        eleccion = self._dialogo_aplicar_redaccion(self.redaccion_pendiente)
+        if eleccion is None:
+            return False
+        opciones, metadatos = eleccion
+        redaccion = self.redaccion_pendiente
+        self.redaccion_pendiente = Redaccion()       # antes de ejecutar: el cambio del documento no avisa
+        if not self._ejecutar("Aplicar redacción", Redactar(redaccion, opciones)):
+            self.redaccion_pendiente = redaccion
+            self._mostrar_redaccion_pendiente()
+            return False
+        if metadatos:
+            self._ejecutar("Borrar metadatos", LimpiarMetadatos())
+        self.set_modo(Modo.MANO)
+        self._mostrar_redaccion_pendiente()
+        self.statusBar().showMessage("Redacción aplicada. Al guardar, el archivo se reescribe completo y se "
+                                     "verifica que lo redactado no se pueda extraer.", 10000)
+        return True
+
+    def borrar_metadatos(self) -> bool:
+        if self.documento is None:
+            return False
+        return self._ejecutar("Borrar metadatos", LimpiarMetadatos())
+
+    # ------------------------------------------------------------------ formularios
+    def _actualizar_formulario(self) -> None:
+        if self.documento is None:
+            self.panel_formulario.set_campos([])
+            return
+        try:
+            lista = campos(self.documento.doc)
+        except Exception:
+            registro().exception("No se pudieron leer los campos del formulario")
+            lista = []
+        self.panel_formulario.set_campos(lista)
+        self.lateral.set_insignia("formulario", len(lista))
+        self.acc_aplanar.setEnabled(bool(lista))
+
+    def completar_formulario(self, valores: dict) -> bool:
+        if self.documento is None:
+            return False
+        try:
+            op = CompletarFormulario(valores)
+        except ValueError as e:
+            self._informar("Completar formulario", str(e), error=True)
+            return False
+        return self._ejecutar("Completar formulario", op)
+
+    def aplanar_formulario(self) -> bool:
+        if self.documento is None:
+            return False
+        if not tiene_formulario(self.documento.doc):
+            self._informar("Aplanar formulario", "Este documento no tiene campos de formulario.")
+            return False
+        if self.panel_formulario.cambios() and self._preguntar(
+                "Aplanar formulario", "Hay cambios en el formulario sin aplicar. ¿Aplicarlos antes de aplanar?"):
+            self.completar_formulario(self.panel_formulario.cambios())
+        if not self._preguntar("Aplanar formulario", "Los campos pasan a ser contenido fijo de la página: se ven "
+                                                      "igual, pero ya no se pueden completar. Se puede deshacer "
+                                                      "mientras el documento esté abierto. ¿Aplanar?"):
+            return False
+        return self._ejecutar("Aplanar formulario", AplanarFormulario())
+
+    def _ir_a_campo(self, pagina: int, rect: tuple) -> None:
+        if self.documento is None or pagina >= self.documento.doc.page_count:
+            return
+        self.visor.ir_a_pagina(pagina)
+        self.visor.mostrar_resultados([(pagina, pymupdf.Rect(rect))], 0)
 
     # ------------------------------------------------------------------ tareas en otro proceso
     def _mostrar_progreso(self, titulo: str, texto: str, cancelar) -> QProgressDialog:
@@ -1373,6 +1545,14 @@ class VentanaPrincipal(QMainWindow):
     def _documento_cambio(self) -> None:
         self._cache_fuentes = {}
         self.bloque = None
+        if not self.redaccion_pendiente.vacia:
+            # Las zonas marcadas se refieren al documento anterior: no se pueden aplicar a otro
+            self.redaccion_pendiente = Redaccion()
+            self.visor.mostrar_redaccion([])
+            self.aviso.hide()
+            self.statusBar().showMessage("El documento cambió: se descartaron las marcas de redacción "
+                                         "pendientes. Volvé a marcarlas.", 8000)
+        self._actualizar_formulario()
         self.visor.recargar()
         self.miniaturas.recargar()
         self.busqueda.rehacer_busqueda()
@@ -1495,8 +1675,13 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir,
                   self.acc_ocr, self.acc_eliminar_paginas, self.acc_insertar_blanco, self.acc_insertar_pdf,
                   self.acc_extraer, self.acc_separar, self.acc_marca_agua, self.acc_numerar, self.acc_comprimir,
-                  self.acc_subir_pagina, self.acc_bajar_pagina):
+                  self.acc_subir_pagina, self.acc_bajar_pagina, self.acc_modo_redactar, self.acc_buscar_redactar,
+                  self.acc_formulario, self.acc_borrar_metadatos):
             a.setEnabled(hay)
+        pendiente = hay and not self.redaccion_pendiente.vacia
+        self.acc_aplicar_redaccion.setEnabled(pendiente)
+        self.acc_descartar_redaccion.setEnabled(pendiente)
+        self.acc_aplanar.setEnabled(hay and bool(self.panel_formulario.campos))
         puede_deshacer = hay and self.documento.puede_deshacer
         puede_rehacer = hay and self.documento.puede_rehacer
         self.acc_deshacer.setEnabled(puede_deshacer)

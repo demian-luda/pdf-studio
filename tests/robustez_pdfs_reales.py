@@ -257,6 +257,48 @@ def prueba_comprimir(documento, tmp: Path) -> tuple[str, str]:
     return OK, "verificada (" + ", ".join(partes) + ")"
 
 
+def prueba_redaccion(documento, tmp: Path) -> tuple[str, str]:
+    """Busca con todos los patrones (DNI, CUIT, CBU, correos, teléfonos), redacta todo lo que
+    encuentra, guarda (completo) y verifica que no quede nada. Solo se informan cantidades."""
+    from pdf_studio.core import redaccion as rd
+    redaccion = rd.Redaccion()
+    cantidad = 0
+    for patron in rd.PATRONES:
+        for c in _etapa("buscar datos", lambda p=patron: rd.buscar(documento.doc, rd.compilar(p.expresion, True))):
+            redaccion.agregar(c)
+            cantidad += 1
+    if redaccion.vacia:
+        return OMITIDA, "no se detectaron datos personales"
+    _etapa("redactar", lambda: documento.ejecutar(rd.Redactar(redaccion)))
+    _etapa("redactar", lambda: documento.ejecutar(rd.LimpiarMetadatos()))
+    guardado = _etapa("guardar", lambda: documento.preparar_guardado())
+    if guardado.problemas:
+        raise Fallo("verificar redacción", AssertionError(f"{len(guardado.problemas)} problema(s)"))
+    if not guardado.fidelidad.ok:
+        raise Fallo("fidelidad", AssertionError("cambió algo fuera de las zonas redactadas"))
+    nota = _guardar_y_verificar(documento, tmp / "redactado.pdf", True)
+    return OK, (f"{cantidad} coincidencia(s) en {len(redaccion.paginas)} pág. eliminadas y verificadas "
+                "(guardado completo)" + nota.replace("; guardado completo", ""))
+
+
+def prueba_formulario(documento, tmp: Path) -> tuple[str, str]:
+    from pdf_studio.core import formularios as fm
+    lista = _etapa("leer formulario", lambda: fm.campos(documento.doc))
+    if not lista:
+        return OMITIDA, "no tiene formulario"
+    editables = [c for c in lista if c.editable and c.tipo in ("texto", "casilla")]
+    if editables:
+        c = editables[0]
+        valor = (not c.valor) if c.tipo == "casilla" else "Prueba"
+        _etapa("completar", lambda: documento.ejecutar(fm.CompletarFormulario({c.nombre: valor})))
+    _etapa("aplanar", lambda: documento.ejecutar(fm.AplanarFormulario()))
+    guardado = _etapa("guardar", lambda: documento.preparar_guardado())
+    if not guardado.es_fiel:
+        raise Fallo("fidelidad", AssertionError("cambió algo fuera de los campos"))
+    nota = _guardar_y_verificar(documento, tmp / "formulario.pdf", True)
+    return OK, f"{len(lista)} campo(s): completado y aplanado, verificado" + nota
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -264,6 +306,8 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("páginas", prueba_paginas),
     ("marca/número", prueba_marcas),
     ("comprimir", prueba_comprimir),
+    ("redacción", prueba_redaccion),
+    ("formulario", prueba_formulario),
 ]
 
 
@@ -297,6 +341,9 @@ def main(argv: list[str]) -> int:
     posicionales = [a for a in argv[1:] if not a.startswith("--")]
     carpeta = Path(posicionales[0]) if posicionales else CARPETA_POR_DEFECTO
     pruebas = [(n, p) for n, p in PRUEBAS if not ("--sin-ocr" in opciones and n == "OCR")]
+    solo = next((o.split("=", 1)[1].split(",") for o in opciones if o.startswith("--solo=")), None)
+    if solo:
+        pruebas = [(n, p) for n, p in pruebas if n in ("abrir", *solo)]
     archivos = sorted(p for p in carpeta.glob("*") if p.suffix.lower() == ".pdf" and p.is_file())
     if not archivos:
         print(f"No hay PDFs en {carpeta}")
