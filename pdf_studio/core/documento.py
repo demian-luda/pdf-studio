@@ -49,16 +49,20 @@ class Operacion:
     def aplicar(self, doc: pymupdf.Document) -> None:
         raise NotImplementedError
 
+    # Redacción real: el contenido borrado no puede quedar en una versión anterior del archivo,
+    # así que el guardado reescribe el PDF completo (sin objetos huérfanos) en vez de agregar
+    requiere_guardado_completo = False
+
     def paginas_afectadas(self) -> set[int]:
-        """Páginas (índices del documento en ese momento) que esta operación modifica."""
+        """Páginas cuyo contenido cambia, con los índices que tienen DESPUÉS de aplicar la
+        operación (para una inserción: las páginas nuevas)."""
         return set()
 
-    def actualizar_mapa(self, mapa: dict[int, int]) -> dict[int, int]:
-        """Recibe {página actual: página original} de las páginas aún sin editar y
-        devuelve el mapa después de aplicar la operación. Por defecto saca las
-        páginas afectadas; las operaciones que mueven páginas lo redefinen."""
-        afectadas = self.paginas_afectadas()
-        return {k: v for k, v in mapa.items() if k not in afectadas}
+    def reubicar(self, total: int) -> tuple[dict[int, int], int] | None:
+        """Si la operación mueve, borra o inserta páginas: ({índice antes: índice después}
+        de las páginas que siguen estando, cantidad de páginas después). None si la
+        estructura de páginas no cambia. `total` es la cantidad de páginas antes."""
+        return None
 
     def regiones_afectadas(self) -> dict[int, list[tuple]] | None:
         """Zonas (rects sin rotar) que la operación puede haber cambiado en cada página.
@@ -229,29 +233,54 @@ class Documento:
     def modificado(self) -> bool:
         return self._posicion != self._posicion_guardada
 
+    def _seguimiento(self) -> tuple[dict[int, int | None], dict[int, list[tuple] | None]]:
+        """Sigue cada página a través de las operaciones. Devuelve:
+        - origen: {página actual: página original} (None si es una página nueva);
+        - zonas: {página actual: zonas editadas} de las páginas tocadas (None = entera)."""
+        origen: dict[int, int | None] = {i: i for i in range(self.paginas_original)}
+        zonas: dict[int, list[tuple] | None] = {}
+        total = self.paginas_original
+        for op in self.operaciones_activas:
+            reubicacion = op.reubicar(total)
+            if reubicacion is not None:
+                movidas, total = reubicacion
+                origen = {movidas[k]: v for k, v in origen.items() if k in movidas}
+                zonas = {movidas[k]: v for k, v in zonas.items() if k in movidas}
+                for i in range(total):
+                    origen.setdefault(i, None)      # páginas insertadas
+            regiones = op.regiones_afectadas()
+            for p in op.paginas_afectadas():
+                if origen.get(p) is None or regiones is None or p not in regiones:
+                    zonas[p] = None
+                elif p not in zonas:
+                    zonas[p] = list(regiones[p])
+                elif zonas[p] is not None:
+                    zonas[p].extend(regiones[p])
+        return origen, zonas
+
     def mapa_paginas(self) -> dict[int, int]:
         """{página actual: página original} de las páginas que no se editaron."""
-        mapa = {i: i for i in range(self.paginas_original)}
-        for op in self.operaciones_activas:
-            mapa = op.actualizar_mapa(mapa)
-        return mapa
+        origen, zonas = self._seguimiento()
+        return {p: o for p, o in origen.items() if o is not None and p not in zonas}
 
     def paginas_editadas(self) -> set[int]:
         return set(range(self.doc.page_count)) - set(self.mapa_paginas())
 
-    def regiones_editadas(self) -> dict[int, list[tuple]]:
-        """{página: zonas editadas} para las páginas donde TODAS las operaciones declararon
-        sus zonas. El resto de esas páginas debe quedar idéntico al original."""
-        regiones: dict[int, list[tuple]] = {}
-        completas: set[int] = set()
-        for op in self.operaciones_activas:
-            r = op.regiones_afectadas()
-            for p in op.paginas_afectadas():
-                if r is None or p not in r:
-                    completas.add(p)
-                else:
-                    regiones.setdefault(p, []).extend(r[p])
-        return {p: v for p, v in regiones.items() if p not in completas}
+    def regiones_editadas(self) -> dict[int, tuple[int, list[tuple]]]:
+        """{página actual: (página original, zonas editadas)} de las páginas editadas donde
+        TODAS las operaciones declararon sus zonas: el resto de la página debe quedar
+        idéntico a la página original."""
+        origen, zonas = self._seguimiento()
+        return {p: (origen[p], z) for p, z in zonas.items() if z is not None and origen.get(p) is not None}
+
+    def paginas_nuevas(self) -> list[int]:
+        """Páginas que no vienen del original (insertadas en blanco o desde otro PDF)."""
+        origen, _ = self._seguimiento()
+        return sorted(p for p, o in origen.items() if o is None)
+
+    @property
+    def requiere_guardado_completo(self) -> bool:
+        return any(op.requiere_guardado_completo for op in self.operaciones_activas)
 
     # ------------------------------------------------------------------ guardado
     def ruta_sugerida(self) -> Path:
@@ -271,7 +300,14 @@ class Documento:
             try:
                 for op in ops:
                     op.aplicar(doc)
-                if doc.can_save_incrementally():
+                if self.requiere_guardado_completo:
+                    completo = salida.with_suffix(".completo.pdf")
+                    # garbage=4: se descartan los objetos que ya nadie usa (el contenido eliminado)
+                    doc.save(completo, garbage=4, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+                    avisos.append("Por la redacción, el archivo se reescribió completo: así el contenido "
+                                  "eliminado no queda guardado en ninguna parte del PDF (sin re-renderizar "
+                                  "ni rasterizar nada).")
+                elif doc.can_save_incrementally():
                     doc.save(salida, incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
                     incremental = True
                 else:
@@ -289,8 +325,7 @@ class Documento:
         estructura_ok, error = _verificar_estructura(salida, self._contrasena)
         if error:
             avisos.append(f"Detalle de estructura: {error}")
-        parciales = {p: (p, zonas) for p, zonas in self.regiones_editadas().items()
-                     if p < self.paginas_original}
+        parciales = self.regiones_editadas()
         fidelidad = comparar_documentos(self._base, salida, self.mapa_paginas(),
                                         contrasena=self._contrasena, progreso=progreso,
                                         parciales=parciales)

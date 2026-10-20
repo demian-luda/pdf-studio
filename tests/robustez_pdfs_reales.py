@@ -199,10 +199,71 @@ def prueba_ocr(documento, tmp: Path) -> tuple[str, str]:
                 f"(píxeles = 0)" + nota)
 
 
+def prueba_paginas(documento, tmp: Path) -> tuple[str, str]:
+    """Rotar, mover, insertar en blanco, eliminar e insertar desde otro PDF; guardar y verificar
+    que cada página no editada coincida con su original en su nuevo lugar."""
+    from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePDF, InsertarPaginasEnBlanco,
+                                         ReordenarPaginas, RotarPagina, extraer_paginas, mover_paginas)
+    total = documento.doc.page_count
+    # Tamaño leído antes de mover páginas: mover deja inválidos los objetos Page anteriores
+    tamano = (documento.doc[0].rect.width, documento.doc[0].rect.height)
+    _etapa("rotar", lambda: documento.ejecutar(RotarPagina([0], 90)))
+    if total > 1:
+        _etapa("reordenar", lambda: documento.ejecutar(ReordenarPaginas(mover_paginas(total, [total - 1], 0))))
+    _etapa("insertar en blanco", lambda: documento.ejecutar(
+        InsertarPaginasEnBlanco(1, 1, tamano)))
+    _etapa("eliminar", lambda: documento.ejecutar(EliminarPaginas([1], documento.doc.page_count)))
+    copia = tmp / "otro.pdf"
+    _etapa("insertar desde PDF", lambda: copia.write_bytes(documento.ruta_base.read_bytes()))
+    fuente = _etapa("insertar desde PDF", lambda: FuentePDF.desde_archivo(copia, paginas=[0]))
+    _etapa("insertar desde PDF", lambda: documento.ejecutar(InsertarDesdePDF(documento.doc.page_count, [fuente])))
+    guardado = _etapa("guardar", lambda: documento.preparar_guardado())
+    if not guardado.es_fiel:
+        raise Fallo("fidelidad", AssertionError("una página movida no coincide con su original"))
+    esperadas = total - 1          # todas menos la rotada
+    if len(guardado.fidelidad.comparadas) != esperadas:
+        raise Fallo("fidelidad", AssertionError("no se siguieron bien las páginas movidas"))
+    nota = _guardar_y_verificar(documento, tmp / "paginas.pdf", True)
+    extraidos = _etapa("extraer", lambda: extraer_paginas(documento.doc, [[0, documento.doc.page_count - 1]],
+                                                           [tmp / "extracto.pdf"]))
+    if not extraidos[0].identico:
+        raise Fallo("extraer", AssertionError("las páginas extraídas no se ven igual"))
+    return OK, f"{esperadas} pág. movidas verificadas (píxeles = 0), extracción idéntica" + nota
+
+
+def prueba_marcas(documento, tmp: Path) -> tuple[str, str]:
+    from pdf_studio.core.marcas import MarcaDeAgua, NumerarPaginas, OpcionesMarca, OpcionesNumeracion
+    total = documento.doc.page_count
+    paginas = list(range(min(total, 3)))
+    _etapa("marca de agua", lambda: documento.ejecutar(MarcaDeAgua(paginas, OpcionesMarca(texto="PRUEBA"))))
+    _etapa("numerar", lambda: documento.ejecutar(NumerarPaginas(list(range(total)), OpcionesNumeracion())))
+    guardado = _etapa("guardar", lambda: documento.preparar_guardado())
+    if not guardado.es_fiel:
+        raise Fallo("fidelidad", AssertionError("cambió algo fuera de la marca o del número"))
+    nota = _guardar_y_verificar(documento, tmp / "marcas.pdf", True)
+    return OK, f"fuera de las zonas agregadas, {len(guardado.fidelidad.parciales)} pág. idénticas" + nota
+
+
+def prueba_comprimir(documento, tmp: Path) -> tuple[str, str]:
+    from pdf_studio.core import comprimir as cz
+    partes = []
+    for nivel in (cz.NivelCompresion.BAJO, cz.NivelCompresion.MEDIO):
+        salida = tmp / f"comprimido_{nivel.value}.pdf"
+        r = _etapa(f"comprimir {nivel.value}", lambda n=nivel, s=salida: cz.comprimir_y_verificar(
+            documento.ruta_base, s, n, documento.contrasena))
+        if not r.fidelidad.ok:
+            raise Fallo(f"fidelidad {nivel.value}", AssertionError("la compresión cambió el aspecto"))
+        partes.append(f"{nivel.value} {-r.reduccion:+.0%}")
+    return OK, "verificada (" + ", ".join(partes) + ")"
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
     ("OCR", prueba_ocr),
+    ("páginas", prueba_paginas),
+    ("marca/número", prueba_marcas),
+    ("comprimir", prueba_comprimir),
 ]
 
 

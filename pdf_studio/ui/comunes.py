@@ -13,15 +13,22 @@ from pdf_studio.ui import iconos
 from pdf_studio.ui.tema import marcar_primario
 
 
-def botonera(dialogo: QDialog, texto_ok: str, icono_ok: str | None = None) -> QDialogButtonBox:
-    """Aceptar (botón principal, con el texto de la acción) y Cancelar."""
+def botonera(dialogo: QDialog, texto_ok: str, icono_ok: str | None = None,
+             primario: bool = True) -> QDialogButtonBox:
+    """Aceptar (con el texto de la acción) y Cancelar. Si `primario` es False (p. ej. guardar
+    un resultado con advertencias), Aceptar no es el botón principal ni responde a Enter."""
     botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialogo)
     ok = botones.button(QDialogButtonBox.StandardButton.Ok)
+    cancelar = botones.button(QDialogButtonBox.StandardButton.Cancel)
     ok.setText(texto_ok)
-    marcar_primario(ok)
+    if primario:
+        marcar_primario(ok)
+    else:
+        ok.setAutoDefault(False)
+        cancelar.setDefault(True)
     if icono_ok:
         iconos.asignar(ok, icono_ok)
-    botones.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+    cancelar.setText("Cancelar")
     botones.accepted.connect(dialogo.accept)
     botones.rejected.connect(dialogo.reject)
     return botones

@@ -96,6 +96,8 @@ def hoja_de_estilos(p: Paleta, escala: float) -> str:
     pad = round(4 * escala)
     ind = round(14 * escala)
     check = _icono_qss("check", p.sobre_acento)
+    arriba, abajo = _icono_qss("chevron-up", p.texto_suave), _icono_qss("chevron-down", p.texto_suave)
+    flecha = round(18 * escala)
     return f"""
 * {{ font-size: {t}pt; }}
 QWidget {{ color: {p.texto}; background: {p.fondo}; selection-background-color: {p.acento};
@@ -137,10 +139,24 @@ QPushButton:disabled {{ color: {p.texto_suave}; background: {p.superficie}; }}
 QPushButton[primario="true"] {{ background: {p.acento}; color: {p.sobre_acento}; border-color: {p.acento};
     font-weight: 600; }}
 QPushButton[primario="true"]:focus {{ border: 2px solid {p.texto}; }}
-QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QComboBox {{ background: {p.superficie}; color: {p.texto};
-    border: 1px solid {p.borde_control}; border-radius: {r}px; padding: {pad}px {pad + 2}px; }}
-QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBox:focus {{
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background: {p.superficie};
+    color: {p.texto}; border: 1px solid {p.borde_control}; border-radius: {r}px; padding: {pad}px {pad + 2}px; }}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 2px solid {p.acento}; }}
+QSpinBox, QDoubleSpinBox {{ padding-right: {flecha + pad}px; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border; width: {flecha}px; border: none; background: transparent; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::down-button:hover {{ background: {p.superficie_alta}; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("{arriba}"); width: {flecha - 8}px; height: {flecha - 8}px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("{abajo}"); width: {flecha - 8}px;
+    height: {flecha - 8}px; }}
+QComboBox {{ padding-right: {flecha + pad}px; }}
+QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: {flecha}px;
+    border: none; background: transparent; }}
+QComboBox::down-arrow {{ image: url("{abajo}"); width: {flecha - 6}px; height: {flecha - 6}px; }}
 QComboBox QAbstractItemView {{ background: {p.superficie}; border: 1px solid {p.borde}; }}
 QCheckBox, QRadioButton, QLabel {{ background: transparent; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: {ind}px; height: {ind}px; background: {p.superficie};

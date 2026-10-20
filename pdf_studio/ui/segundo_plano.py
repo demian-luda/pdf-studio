@@ -95,7 +95,10 @@ class AnalizadorFuentes(QObject):
         if proceso is not self._proceso:
             return          # resultado de un análisis viejo, ya reemplazado
         self._proceso = None
-        self._reloj.stop()
+        try:
+            self._reloj.stop()
+        except RuntimeError:
+            return          # la ventana ya se cerró
         salida = bytes(proceso.readAllStandardOutput()).decode("utf-8", errors="replace")
         proceso.deleteLater()
         try:
@@ -183,7 +186,10 @@ class ProcesoExterno(QObject):
         if proceso is not self._proceso:
             return
         self._proceso = None
-        self._reloj.stop()
+        try:
+            self._reloj.stop()
+        except RuntimeError:
+            return          # la ventana ya se cerró
         error = bytes(proceso.readAllStandardError()).decode("utf-8", errors="replace")
         proceso.deleteLater()
         self.terminado.emit(int(codigo), error)

@@ -1,10 +1,14 @@
-"""Panel lateral de miniaturas. Se renderizan de a poco para no trabar la interfaz."""
+"""Panel lateral de miniaturas. Se renderizan de a poco para no trabar la interfaz.
+
+Se pueden elegir varias (Ctrl/Mayús + clic) y arrastrarlas para reordenar: el panel no
+mueve nada por su cuenta, avisa con `paginas_movidas` y la ventana ejecuta la operación
+(así se puede deshacer y el documento sigue cada página para verificar la fidelidad)."""
 from __future__ import annotations
 
 import pymupdf
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QListView, QListWidget, QListWidgetItem, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QWidget
 
 from pdf_studio.core.documento import Documento
 from pdf_studio.ui.visor import pixmap_a_qimage
@@ -15,6 +19,7 @@ POR_TANDA = 4
 
 class PanelMiniaturas(QListWidget):
     pagina_elegida = Signal(int)
+    paginas_movidas = Signal(list, int)       # (páginas, destino: índice antes del cual quedan)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -27,6 +32,14 @@ class PanelMiniaturas(QListWidget):
         self.setSpacing(6)
         self.setUniformItemSizes(False)
         self.setMinimumWidth(ANCHO_MINIATURA + 40)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self.setAccessibleName("Miniaturas de las páginas")
         self.documento: Documento | None = None
         self._pendientes: list[int] = []
         self._temporizador = QTimer(self)
@@ -103,6 +116,37 @@ class PanelMiniaturas(QListWidget):
             self.setCurrentRow(indice)
             self.scrollToItem(self.item(indice))
             self._sin_senal = False
+
+    # ------------------------------------------------------------------ selección y arrastre
+    def paginas_seleccionadas(self) -> list[int]:
+        return sorted({i.row() for i in self.selectedIndexes()})
+
+    def fila_destino(self, pos) -> int:
+        """Índice antes del cual se suelta (mitad superior de una miniatura = antes de ella)."""
+        item = self.itemAt(pos)
+        if item is None:
+            return self.count()
+        fila = self.row(item)
+        return fila + 1 if pos.y() > self.visualItemRect(item).center().y() else fila
+
+    def dragMoveEvent(self, evento) -> None:
+        if evento.source() is self:
+            evento.setDropAction(Qt.DropAction.MoveAction)
+            evento.accept()
+        else:
+            evento.ignore()
+
+    def dropEvent(self, evento) -> None:
+        if evento.source() is not self:
+            evento.ignore()
+            return
+        destino = self.fila_destino(evento.position().toPoint())
+        paginas = self.paginas_seleccionadas()
+        # Qt no mueve nada: la ventana aplica la operación y el panel se recarga
+        evento.setDropAction(Qt.DropAction.IgnoreAction)
+        evento.accept()
+        if paginas:
+            self.paginas_movidas.emit(paginas, destino)
 
     def _fila_cambiada(self, fila: int) -> None:
         if not self._sin_senal and fila >= 0:

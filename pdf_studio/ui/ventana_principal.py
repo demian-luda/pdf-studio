@@ -5,12 +5,14 @@ que los tests puedan reemplazarlos sin abrir ventanas modales.
 """
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QImage, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressDialog, QToolButton,
                                QVBoxLayout, QWidget)
@@ -24,7 +26,11 @@ from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrm
                                  entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto, parece_escaneado)
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
-from pdf_studio.core.paginas import RotarPagina
+from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
+from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePDF, InsertarPaginasEnBlanco,
+                                     ReordenarPaginas, RotarPagina, extraer_paginas, mover_paginas,
+                                     nombres_libres)
+from pdf_studio import procesos
 from pdf_studio.core.sustitucion import PlanSustitucion
 from pdf_studio.core.texto import BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en, planificar
 from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_inicio, faltantes_de_fuentes
@@ -43,6 +49,8 @@ from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.ocr import DialogoOCR
+from pdf_studio.ui.paginas import (DialogoComprimir, DialogoExtraer, DialogoInsertarPDF, DialogoMarcaAgua,
+                                   DialogoNumeracion, DialogoResultadoCompresion, DialogoSeparar)
 from pdf_studio.ui.paleta_comandos import PaletaComandos
 from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo, ProcesoExterno
 from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
@@ -70,6 +78,11 @@ class VentanaPrincipal(QMainWindow):
         self.proceso_ocr.terminado.connect(self._ocr_terminado)
         self._ocr: tuple | None = None            # (modo, páginas, salida, documento) del OCR en curso
         self._progreso_ocr: QProgressDialog | None = None
+        # Tareas pesadas de MuPDF (comprimir, comparar) en otro proceso
+        self.proceso_tarea = ProcesoExterno(self)
+        self.proceso_tarea.terminado.connect(self._tarea_terminada)
+        self._tarea: tuple | None = None          # (nombre, archivo de resultado, función al terminar)
+        self._progreso_tarea: QProgressDialog | None = None
         self.setWindowTitle(NOMBRE_APP)
         self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
@@ -143,8 +156,11 @@ class VentanaPrincipal(QMainWindow):
 
     # ------------------------------------------------------------------ acciones
     def _accion(self, texto: str, icono: str | None, atajo=None, slot=None, checkable: bool = False,
-                tip: str = "", grupo: str = "") -> QAction:
+                tip: str = "", grupo: str = "", corto: str = "") -> QAction:
+        """`corto`: texto debajo del ícono en la cinta (el nombre completo va en el tooltip y la paleta)."""
         a = QAction(texto, self)
+        if corto:
+            a.setIconText(corto)
         atajos = [] if atajo is None else ([atajo] if not isinstance(atajo, (list, tuple)) else list(atajo))
         if atajos:
             a.setShortcuts([QKeySequence(x) for x in atajos])
@@ -187,9 +203,36 @@ class VentanaPrincipal(QMainWindow):
         self.acc_deshacer = self._accion("Deshacer", "undo-2", S.Undo, self.deshacer, grupo=E)
         self.acc_rehacer = self._accion("Rehacer", "redo-2", ["Ctrl+Y", "Ctrl+Shift+Z"], self.rehacer, grupo=E)
         self.acc_rotar_der = self._accion("Rotar a la derecha", "rotate-cw", "Ctrl+R", lambda: self.rotar(90),
-                                          grupo=P)
+                                          grupo=P, tip="Rota la página actual o las miniaturas seleccionadas.",
+                                          corto="Rotar der.")
         self.acc_rotar_izq = self._accion("Rotar a la izquierda", "rotate-ccw", "Ctrl+Shift+R",
-                                          lambda: self.rotar(-90), grupo=P)
+                                          lambda: self.rotar(-90), grupo=P, corto="Rotar izq.")
+        self.acc_eliminar_paginas = self._accion("Eliminar páginas", "trash-2", None, self.eliminar_paginas,
+                                                 grupo=P, tip="La página actual o las seleccionadas (Supr en las "
+                                                              "miniaturas). Se puede deshacer.", corto="Eliminar")
+        self.acc_subir_pagina = self._accion("Mover antes", "arrow-up", "Ctrl+Alt+Up",
+                                             lambda: self.desplazar_paginas(-1), grupo=P,
+                                             tip="Mueve la página (o las seleccionadas) un lugar antes. "
+                                                 "También se puede arrastrar las miniaturas.", corto="Antes")
+        self.acc_bajar_pagina = self._accion("Mover después", "arrow-down", "Ctrl+Alt+Down",
+                                             lambda: self.desplazar_paginas(1), grupo=P,
+                                             tip="Mueve la página (o las seleccionadas) un lugar después.",
+                                             corto="Después")
+        self.acc_insertar_blanco = self._accion("Insertar página en blanco", "file-plus-2", None,
+                                                self.insertar_en_blanco, grupo=P,
+                                                tip="Después de la página actual, del mismo tamaño.",
+                                                corto="En blanco")
+        self.acc_insertar_pdf = self._accion("Insertar desde PDF…", "file-input", None, self.insertar_desde_pdf,
+                                             grupo=P, tip="Unir: agrega páginas de otros PDFs.", corto="Desde PDF")
+        self.acc_extraer = self._accion("Extraer páginas…", "file-output", None, self.extraer, grupo=P,
+                                        tip="Copia páginas a un PDF nuevo.", corto="Extraer")
+        self.acc_separar = self._accion("Separar en archivos…", "scissors", None, self.separar, grupo=P,
+                                        tip="Divide el documento en varios PDFs.", corto="Separar")
+        self.acc_marca_agua = self._accion("Marca de agua…", "stamp", None, self.marca_de_agua, grupo=P,
+                                           tip="Texto o imagen, con opacidad, posición y rango de páginas.",
+                                           corto="Marca de agua")
+        self.acc_numerar = self._accion("Numerar páginas…", "list-ordered", None, self.numerar_paginas, grupo=P,
+                                        tip="Por ejemplo «Página 1 de 10».", corto="Numerar")
 
         self.grupo_modo = QActionGroup(self)
         self.acc_modo_mano = self._accion("Mano", "hand", "H", lambda: self.set_modo(Modo.MANO), True,
@@ -255,6 +298,8 @@ class VentanaPrincipal(QMainWindow):
                                           grupo=H, tip="Modo armónico: reemplaza una fuente en todo el documento.")
         self.acc_ocr = self._accion("Reconocer texto (OCR)…", "scan-text", "Ctrl+Shift+O", self.reconocer_texto,
                                     grupo=H, tip="Hace buscable y copiable el texto de páginas escaneadas.")
+        self.acc_comprimir = self._accion("Comprimir…", "shrink", None, self.comprimir, grupo=H,
+                                          tip="Crea una copia más liviana y muestra el tamaño antes y después.")
         self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.chequear_dependencias,
                                          grupo=H)
         self.acc_paleta = self._accion("Paleta de comandos", "command", "Ctrl+K", self.abrir_paleta, grupo=H,
@@ -321,10 +366,13 @@ class VentanaPrincipal(QMainWindow):
         for a in (self.acc_firmas, self.acc_insertar_imagen):
             firmar.addAction(a)
         paginas = enc.agregar_pestana("Páginas")
-        for a in (self.acc_rotar_izq, self.acc_rotar_der):
-            paginas.addAction(a)
+        for a in (self.acc_rotar_izq, self.acc_rotar_der, self.acc_subir_pagina, self.acc_bajar_pagina, None,
+                  self.acc_insertar_blanco, self.acc_insertar_pdf, self.acc_eliminar_paginas, None, self.acc_extraer, self.acc_separar, None, self.acc_marca_agua,
+                  self.acc_numerar):
+            paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_ocr, None, self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
+        for a in (self.acc_ocr, self.acc_comprimir, None, self.acc_sustituir, self.acc_chequear, None,
+                  self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
         enc.pestanas.setCurrentIndex(1)       # arranca en "Editar"
@@ -337,6 +385,18 @@ class VentanaPrincipal(QMainWindow):
         self.visor.rect_seleccionado.connect(self._resaltar_en)
         self.visor.punto_clic.connect(self._nota_en)
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
+        self.miniaturas.paginas_movidas.connect(self.mover_paginas)
+        separador = QAction(self.miniaturas)
+        separador.setSeparator(True)
+        separador2 = QAction(self.miniaturas)
+        separador2.setSeparator(True)
+        for a in (self.acc_rotar_izq, self.acc_rotar_der, self.acc_subir_pagina, self.acc_bajar_pagina,
+                  separador, self.acc_insertar_blanco,
+                  self.acc_insertar_pdf, self.acc_extraer, separador2, self.acc_eliminar_paginas):
+            self.miniaturas.addAction(a)
+        suprimir = QShortcut(QKeySequence(QKeySequence.StandardKey.Delete), self.miniaturas)
+        suprimir.setContext(Qt.ShortcutContext.WidgetShortcut)
+        suprimir.activated.connect(self.eliminar_paginas)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
         self.faltantes.rechequear.connect(self.chequear_dependencias)
         self.faltantes.instalar.connect(self.instalar_faltante)
@@ -449,6 +509,38 @@ class VentanaPrincipal(QMainWindow):
         if dialogo.exec():
             return dialogo.modo, dialogo.paginas
         return None
+
+    def _dialogo_insertar_pdf(self) -> tuple[int, list[FuentePDF]] | None:
+        d = DialogoInsertarPDF(self.documento.doc.page_count, self.visor.pagina_actual, self)
+        return (d.posicion, d.fuentes) if d.exec() else None
+
+    def _dialogo_extraer(self) -> list[int] | None:
+        d = DialogoExtraer(self.documento.doc.page_count, self.visor.pagina_actual,
+                           self.miniaturas.paginas_seleccionadas(), self)
+        return d.paginas if d.exec() else None
+
+    def _dialogo_separar(self) -> list[list[int]] | None:
+        d = DialogoSeparar(self.documento.doc.page_count, self)
+        return d.grupos if d.exec() else None
+
+    def _pedir_carpeta(self, titulo: str) -> str | None:
+        ruta = QFileDialog.getExistingDirectory(self, titulo, str(self.documento.ruta_original.parent))
+        return ruta or None
+
+    def _dialogo_marca_agua(self):
+        d = DialogoMarcaAgua(self.documento.doc, self.visor.pagina_actual, self)
+        return d.operacion if d.exec() else None
+
+    def _dialogo_numeracion(self):
+        d = DialogoNumeracion(self.documento.doc, self.visor.pagina_actual, self)
+        return d.operacion if d.exec() else None
+
+    def _dialogo_comprimir(self, tamano: int, hay_ghostscript: bool) -> NivelCompresion | None:
+        d = DialogoComprimir(tamano, hay_ghostscript, self)
+        return d.nivel if d.exec() else None
+
+    def _dialogo_resultado_compresion(self, resultado: ResultadoCompresion) -> bool:
+        return bool(DialogoResultadoCompresion(resultado, self).exec())
 
     def _confirmar_instalacion(self, inst: Instalacion) -> bool:
         return bool(DialogoConfirmarInstalacion(inst, self).exec())
@@ -567,6 +659,7 @@ class VentanaPrincipal(QMainWindow):
         self.documento = None
         self.analizador.cancelar()
         self.cancelar_ocr()
+        self.cancelar_tarea()
         self.aviso.hide()
         self.faltantes.set_estado("documento", None)
         self._estado_analisis()
@@ -592,6 +685,9 @@ class VentanaPrincipal(QMainWindow):
 
     def closeEvent(self, evento: QCloseEvent) -> None:
         if self.cerrar_documento():
+            self.analizador.cancelar()
+            self.proceso_ocr.cancelar()
+            self.proceso_tarea.cancelar()
             for hilo in list(self._hilos):
                 hilo.wait(10_000)       # no destruir hilos en marcha
             evento.accept()
@@ -687,7 +783,7 @@ class VentanaPrincipal(QMainWindow):
 
     def rotar(self, grados: int) -> None:
         if self.documento is not None:
-            self.documento.ejecutar(RotarPagina(self.visor.pagina_actual, grados))
+            self.documento.ejecutar(RotarPagina(self.paginas_objetivo(), grados))
 
     def set_modo(self, modo: Modo) -> None:
         self.visor.set_modo(modo)
@@ -809,6 +905,291 @@ class VentanaPrincipal(QMainWindow):
         self.visor.cancelar_colocacion()
         self.panel_firmas.set_colocando(False)
         self.statusBar().clearMessage()
+
+    # ------------------------------------------------------------------ páginas
+    def paginas_objetivo(self) -> list[int]:
+        """Las miniaturas seleccionadas o, si no hay, la página actual."""
+        seleccion = [p for p in self.miniaturas.paginas_seleccionadas() if p < self.documento.doc.page_count]
+        return seleccion or [self.visor.pagina_actual]
+
+    def _ejecutar(self, titulo: str, operacion) -> bool:
+        """Ejecuta una operación avisando con un mensaje claro si no se puede."""
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.documento.ejecutar(operacion)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except (ErrorDocumento, ValueError) as e:
+            self._informar(titulo, str(e), error=True)
+            return False
+        self.statusBar().showMessage(operacion.descripcion() + ": listo (Ctrl+Z para deshacer).", 6000)
+        return True
+
+    def eliminar_paginas(self) -> bool:
+        if self.documento is None:
+            return False
+        try:
+            op = EliminarPaginas(self.paginas_objetivo(), self.documento.doc.page_count)
+        except (ErrorDocumento, ValueError) as e:
+            self._informar("Eliminar páginas", str(e), error=True)
+            return False
+        return self._ejecutar("Eliminar páginas", op)
+
+    def insertar_en_blanco(self) -> bool:
+        if self.documento is None:
+            return False
+        actual = self.visor.pagina_actual
+        pag = self.documento.doc[actual]
+        if self._ejecutar("Insertar página", InsertarPaginasEnBlanco(actual + 1, 1, (pag.rect.width, pag.rect.height))):
+            self.visor.ir_a_pagina(actual + 1)
+            return True
+        return False
+
+    def insertar_desde_pdf(self) -> bool:
+        if self.documento is None:
+            return False
+        eleccion = self._dialogo_insertar_pdf()
+        if eleccion is None:
+            return False
+        posicion, fuentes = eleccion
+        try:
+            op = InsertarDesdePDF(posicion, fuentes)
+        except (ErrorDocumento, ValueError) as e:
+            self._informar("Insertar páginas", str(e), error=True)
+            return False
+        if self._ejecutar("Insertar páginas", op):
+            self.visor.ir_a_pagina(posicion)
+            return True
+        return False
+
+    def mover_paginas(self, paginas: list[int], destino: int) -> bool:
+        if self.documento is None:
+            return False
+        total = self.documento.doc.page_count
+        orden = mover_paginas(total, paginas, destino)
+        if orden == list(range(total)):
+            return False
+        if not self._ejecutar("Reordenar páginas", ReordenarPaginas(orden)):
+            return False
+        nuevas = [orden.index(p) for p in sorted(paginas)]
+        self.visor.ir_a_pagina(nuevas[0])
+        return True
+
+    def desplazar_paginas(self, delta: int) -> bool:
+        """Mueve las páginas elegidas un lugar antes (-1) o después (+1): la alternativa con
+        teclado a arrastrar las miniaturas."""
+        if self.documento is None:
+            return False
+        paginas = self.paginas_objetivo()
+        total = self.documento.doc.page_count
+        destino = paginas[0] - 1 if delta < 0 else paginas[-1] + 2
+        if destino < 0 or destino > total:
+            return False
+        orden = mover_paginas(total, paginas, destino)
+        if not self.mover_paginas(paginas, destino):
+            return False
+        nuevas = [orden.index(p) for p in paginas]
+        self.miniaturas.clearSelection()
+        for p in nuevas:
+            self.miniaturas.item(p).setSelected(True)
+        return True
+
+    def _aviso_contrasena(self) -> str:
+        return ("\n\nOjo: el documento tiene contraseña, pero los archivos nuevos quedan sin protección."
+                if self.documento.tiene_contrasena else "")
+
+    def extraer(self) -> bool:
+        if self.documento is None:
+            return False
+        paginas = self._dialogo_extraer()
+        if not paginas:
+            return False
+        sugerida = self.documento.ruta_original.with_name(
+            f"{self.documento.ruta_original.stem}_paginas.pdf")
+        ruta = self._pedir_ruta_guardar(sugerida)
+        if not ruta:
+            return False
+        destino = Path(ruta).with_suffix(".pdf")
+        try:
+            resultado = extraer_paginas(self.documento.doc, [paginas], [destino], sobrescribir=True,
+                                        proteger=[self.documento.ruta_original])[0]
+        except ErrorDocumento as e:
+            self._informar("Extraer páginas", str(e), error=True)
+            return False
+        except OSError as e:
+            self._informar("Extraer páginas", f"No se pudo escribir {destino}: {e}", error=True)
+            return False
+        n = len(paginas)
+        verificado = ("Verificado: se ven igual que en el documento." if resultado.identico else
+                      "¡Atención! Alguna página extraída no se ve igual que en el documento.")
+        self._informar("Extraer páginas", f"Se guardó «{destino.name}» con {n} página{'s' if n != 1 else ''}.\n"
+                                          f"{verificado}{self._aviso_contrasena()}", error=not resultado.identico)
+        return True
+
+    def separar(self) -> bool:
+        if self.documento is None:
+            return False
+        grupos = self._dialogo_separar()
+        if not grupos:
+            return False
+        carpeta = self._pedir_carpeta("Carpeta para los archivos separados")
+        if not carpeta:
+            return False
+        destinos = nombres_libres(Path(carpeta), self.documento.ruta_original.stem, grupos)
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                resultados = extraer_paginas(self.documento.doc, grupos, destinos,
+                                             proteger=[self.documento.ruta_original])
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar("Separar en archivos", str(e), error=True)
+            return False
+        except OSError as e:
+            self._informar("Separar en archivos", f"No se pudo escribir en {carpeta}: {e}", error=True)
+            return False
+        mal = [r.ruta.name for r in resultados if not r.identico]
+        texto = f"Se crearon {len(resultados)} archivos en {carpeta}."
+        texto += ("\nVerificado: todas las páginas se ven igual que en el documento." if not mal else
+                  "\n¡Atención! Estos archivos tienen páginas que no se ven igual: " + ", ".join(mal))
+        self._informar("Separar en archivos", texto + self._aviso_contrasena(), error=bool(mal))
+        return True
+
+    def marca_de_agua(self) -> bool:
+        if self.documento is None:
+            return False
+        op = self._dialogo_marca_agua()
+        return op is not None and self._ejecutar("Marca de agua", op)
+
+    def numerar_paginas(self) -> bool:
+        if self.documento is None:
+            return False
+        op = self._dialogo_numeracion()
+        return op is not None and self._ejecutar("Numerar páginas", op)
+
+    # ------------------------------------------------------------------ tareas en otro proceso
+    def _mostrar_progreso(self, titulo: str, texto: str, cancelar) -> QProgressDialog:
+        progreso = QProgressDialog(texto, "Cancelar", 0, 0, self)
+        progreso.setWindowTitle(titulo)
+        progreso.setWindowModality(Qt.WindowModality.WindowModal)
+        progreso.setMinimumDuration(0)
+        progreso.canceled.connect(cancelar)
+        progreso.show()
+        return progreso
+
+    def iniciar_tarea(self, tarea: str, pedido: dict, titulo: str, texto: str, al_terminar) -> bool:
+        """Corre una tarea de pdf_studio.procesos sin trabar la interfaz.
+        al_terminar(ok, resultado o mensaje de error)."""
+        if self.documento is None or self.proceso_tarea.ocupado:
+            return False
+        carpeta = self.documento.carpeta_trabajo
+        archivo_pedido, archivo_resultado = carpeta / f"{tarea}_pedido.json", carpeta / f"{tarea}_resultado.json"
+        archivo_resultado.unlink(missing_ok=True)
+        archivo_pedido.write_text(json.dumps(pedido), encoding="utf-8")
+        programa, argumentos = procesos.comando(tarea, archivo_pedido, archivo_resultado)
+        self._tarea = (tarea, archivo_resultado, al_terminar, self.documento)
+        self.proceso_tarea.iniciar(programa, argumentos, procesos.entorno())
+        self._progreso_tarea = self._mostrar_progreso(titulo, texto, self.cancelar_tarea)
+        self._estado_analisis()
+        return True
+
+    def cancelar_tarea(self) -> None:
+        if self.proceso_tarea.cancelar():
+            self.statusBar().showMessage("Se canceló la tarea.", 5000)
+        self._tarea = None
+        self._cerrar_progreso_tarea()
+
+    def _cerrar_progreso_tarea(self) -> None:
+        progreso, self._progreso_tarea = self._progreso_tarea, None
+        if progreso is not None:
+            progreso.blockSignals(True)
+            progreso.close()
+            progreso.deleteLater()
+        self._estado_analisis()
+
+    def _tarea_terminada(self, codigo: int, error: str) -> None:
+        self._cerrar_progreso_tarea()
+        pendiente, self._tarea = self._tarea, None
+        if pendiente is None:
+            return
+        tarea, archivo_resultado, al_terminar, documento = pendiente
+        if documento is not self.documento:
+            return
+        try:
+            datos = json.loads(archivo_resultado.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            registro().error("La tarea %s terminó sin resultado (código %s): %s", tarea, codigo, error[-2000:])
+            al_terminar(False, error if codigo < 0 else f"La tarea terminó sin resultado (código {codigo}).")
+            return
+        if not datos.get("ok"):
+            if datos.get("detalle"):
+                registro().error("Falló la tarea %s: %s", tarea, datos["detalle"])
+            al_terminar(False, datos.get("error", "Error desconocido."))
+            return
+        al_terminar(True, datos["resultado"])
+
+    def _preparar_estado_actual(self) -> Path | None:
+        """Archivo con el estado actual (original + ediciones), verificado como al guardar."""
+        if not self.documento.operaciones_activas:
+            return self.documento.ruta_base
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                guardado = self.documento.preparar_guardado()
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar("Preparar el documento", str(e), error=True)
+            return None
+        if not guardado.es_fiel and not self._preguntar_guardar_igual(guardado):
+            return None
+        return guardado.ruta_temporal
+
+    # ------------------------------------------------------------------ compresión
+    def comprimir(self) -> bool:
+        if self.documento is None:
+            return False
+        from pdf_studio.dependencias.chequeo import buscar_ghostscript
+        entrada = self._preparar_estado_actual()
+        if entrada is None:
+            return False
+        nivel = self._dialogo_comprimir(entrada.stat().st_size, buscar_ghostscript() is not None)
+        if nivel is None:
+            return False
+        salida = self.documento.carpeta_trabajo / f"comprimido_{nivel.value}.pdf"
+        salida.unlink(missing_ok=True)
+        pedido = {"entrada": str(entrada), "salida": str(salida), "nivel": nivel.value,
+                  "contrasena": self.documento.contrasena}
+        return self.iniciar_tarea("comprimir", pedido, "Comprimir", f"Comprimiendo ({nivel.texto.lower()}) y "
+                                  "verificando el resultado…", lambda ok, r: self._compresion_lista(ok, r, salida))
+
+    def _compresion_lista(self, ok: bool, resultado, salida: Path) -> None:
+        if not ok:
+            self._informar("Comprimir", resultado, error=True)
+            return
+        resultado = ResultadoCompresion.desde_dict(resultado)
+        if not self._dialogo_resultado_compresion(resultado):
+            self.statusBar().showMessage("No se guardó la copia comprimida.", 5000)
+            return
+        original = self.documento.ruta_original
+        ruta = self._pedir_ruta_guardar(original.with_name(f"{original.stem}_comprimido.pdf"))
+        if not ruta:
+            return
+        destino = Path(ruta).with_suffix(".pdf")
+        if destino.resolve() == original:
+            self._informar("Comprimir", "Elegiste el archivo original: para no perderlo, la copia comprimida "
+                                        "se guarda con otro nombre.", error=True)
+            return
+        try:
+            temporal = destino.with_name(destino.name + ".pdfstudio-tmp")
+            shutil.copy2(salida, temporal)
+            temporal.replace(destino)
+        except OSError as e:
+            self._informar("Comprimir", f"No se pudo escribir {destino}: {e}", error=True)
+            return
+        self.statusBar().showMessage(f"Copia comprimida guardada: {destino}", 8000)
 
     # ------------------------------------------------------------------ OCR
     def reconocer_texto(self) -> bool:
@@ -1026,6 +1407,8 @@ class VentanaPrincipal(QMainWindow):
         texto = "Analizando " + " y ".join(partes) + "…" if partes else ""
         if self.proceso_ocr.ocupado:
             texto = (texto + " · " if texto else "") + "Reconociendo texto…"
+        if self.proceso_tarea.ocupado:
+            texto = (texto + " · " if texto else "") + "Procesando…"
         self.etiqueta_analisis.setText(texto)
 
     def chequear_dependencias(self, mostrar: bool = True) -> None:
@@ -1110,7 +1493,9 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
                   self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir,
-                  self.acc_ocr):
+                  self.acc_ocr, self.acc_eliminar_paginas, self.acc_insertar_blanco, self.acc_insertar_pdf,
+                  self.acc_extraer, self.acc_separar, self.acc_marca_agua, self.acc_numerar, self.acc_comprimir,
+                  self.acc_subir_pagina, self.acc_bajar_pagina):
             a.setEnabled(hay)
         puede_deshacer = hay and self.documento.puede_deshacer
         puede_rehacer = hay and self.documento.puede_rehacer

@@ -18,6 +18,12 @@ def main(argv: list[str] | None = None) -> int:
         # Proceso auxiliar (versión empaquetada): análisis de fuentes sin interfaz
         from pdf_studio.analisis_proceso import main as analizar
         return analizar()
+    if len(argv) > 4 and argv[1] == "--tarea":
+        # Proceso auxiliar (versión empaquetada): compresión, comparación
+        from pathlib import Path
+
+        from pdf_studio.procesos import ejecutar
+        return ejecutar(argv[2], Path(argv[3]), Path(argv[4]))
     if len(argv) > 1 and argv[1] == "--ocrmypdf":
         # Proceso auxiliar (versión empaquetada): ocrmypdf con los argumentos que siguen
         import multiprocessing

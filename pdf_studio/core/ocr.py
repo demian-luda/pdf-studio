@@ -333,10 +333,11 @@ class ReconstruirOCR(Operacion):
         """La imagen del escaneo se reemplaza, SOLO en los recursos de esta página, por un
         dibujo vacío: el contenido original no se reescribe y las otras páginas no cambian."""
         pag = doc[p]
-        area = abs(pag.rect)
+        pagina = pag.rect * pag.derotation_matrix       # las cajas de imágenes vienen sin rotar
+        area = abs(pagina)
         fondos = set()
         for info in pag.get_image_info(xrefs=True):
-            if info.get("xref") and abs(pymupdf.Rect(info["bbox"]) & pag.rect) >= area * FRACCION_FONDO:
+            if info.get("xref") and abs(pymupdf.Rect(info["bbox"]) & pagina) >= area * FRACCION_FONDO:
                 fondos.add(info["xref"])
         if not fondos:
             raise ErrorOCR(f"La página {p + 1} no tiene una imagen de fondo para reemplazar.")
