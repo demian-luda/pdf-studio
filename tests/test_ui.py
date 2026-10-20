@@ -251,9 +251,9 @@ def test_panel_faltantes_y_copiar(ventana):
 
 def test_chequeo_al_abrir_muestra_fuentes(ventana, copia_pdf):
     ventana.abrir(copia_pdf("fuentes_recortadas.pdf"))
-    assert ventana.faltantes.tabla.rowCount() == 4
-    nombres = {ventana.faltantes.tabla.item(i, 0).text() for i in range(4)}
+    tabla = ventana.panel_fuentes.tabla
+    assert tabla.rowCount() == 4
+    nombres = {tabla.item(i, 0).text() for i in range(4)}
     assert "ArialMT" in nombres
-    # En Windows Arial está instalada: no debería quedar como faltante
-    textos = [ventana.faltantes.tabla.item(i, 2).text() for i in range(4)]
-    assert "No hace falta (estándar PDF)" in textos
+    textos = [tabla.item(i, 2).text() for i in range(4)]
+    assert "No hace falta (estándar)" in textos

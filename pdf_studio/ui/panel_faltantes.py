@@ -1,138 +1,150 @@
-"""Panel "Faltantes": qué falta, para qué sirve y el comando de PowerShell para instalarlo."""
+"""Paneles de la barra lateral: "Faltantes" (qué instalar) y "Fuentes del documento"."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit,
-                               QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
+                               QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 from pdf_studio.core.fuentes import Embebido, InfoFuente
 from pdf_studio.dependencias.chequeo import Faltante, Importancia
+from pdf_studio.ui import iconos
+from pdf_studio.ui.tema import gestor
 
-COLORES = {
-    Importancia.NECESARIO: "#c62828",
-    Importancia.RECOMENDADO: "#ef6c00",
-    Importancia.OPCIONAL: "#546e7a",
-}
+
+def _color_importancia(imp: Importancia) -> str:
+    p = gestor().paleta
+    return {Importancia.NECESARIO: p.peligro, Importancia.RECOMENDADO: p.aviso,
+            Importancia.OPCIONAL: p.texto_suave}[imp]
+
+
+def encabezado_panel(titulo: str, parent: QWidget) -> QLabel:
+    etiqueta = QLabel(titulo, parent)
+    etiqueta.setObjectName("titulo_panel")
+    return etiqueta
 
 
 class TarjetaFaltante(QFrame):
+    instalar = Signal(object)        # Faltante
+
     def __init__(self, faltante: Faltante, parent: QWidget | None = None):
         super().__init__(parent)
         self.faltante = faltante
-        self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setObjectName("tarjeta")
         capa = QVBoxLayout(self)
         capa.setContentsMargins(10, 8, 10, 8)
+        capa.setSpacing(6)
 
-        encabezado = QHBoxLayout()
         titulo = QLabel(f"<b>{faltante.titulo}</b>", self)
         titulo.setWordWrap(True)
-        etiqueta = QLabel(faltante.importancia.texto, self)
-        etiqueta.setStyleSheet(f"color: white; background: {COLORES[faltante.importancia]};"
-                               "border-radius: 3px; padding: 1px 6px;")
-        encabezado.addWidget(titulo, 1)
-        encabezado.addWidget(etiqueta, 0, Qt.AlignmentFlag.AlignTop)
-        capa.addLayout(encabezado)
+        capa.addWidget(titulo)
+        self.etiqueta = QLabel(faltante.importancia.texto, self)
+        color = _color_importancia(faltante.importancia)
+        self.etiqueta.setStyleSheet(f"color: {color}; border: 1px solid {color}; border-radius: 8px;"
+                                    "padding: 0 6px;")
+        fila_etiqueta = QHBoxLayout()
+        fila_etiqueta.addWidget(self.etiqueta)
+        fila_etiqueta.addStretch(1)
+        capa.addLayout(fila_etiqueta)
 
         para_que = QLabel(faltante.para_que, self)
         para_que.setWordWrap(True)
         capa.addWidget(para_que)
         if faltante.detalle:
-            detalle = QLabel(f"<i>{faltante.detalle}</i>", self)
+            detalle = QLabel(faltante.detalle, self)
+            detalle.setObjectName("texto_suave")
             detalle.setWordWrap(True)
             capa.addWidget(detalle)
 
+        self.boton_instalar: QPushButton | None = None
         self.boton_copiar: QPushButton | None = None
+        self.texto_comando: QPlainTextEdit | None = None
+        fila = QHBoxLayout()
+        if faltante.instalacion is not None:
+            self.boton_instalar = QPushButton("Instalar", self)
+            self.boton_instalar.setProperty("primario", True)
+            iconos.asignar(self.boton_instalar, "download")
+            self.boton_instalar.setToolTip("Muestra qué se descarga y pide confirmación antes de instalar")
+            self.boton_instalar.clicked.connect(lambda: self.instalar.emit(self.faltante))
+            fila.addWidget(self.boton_instalar)
         if faltante.comando:
-            capa.addWidget(QLabel("Comando de PowerShell:", self))
+            self.boton_copiar = QPushButton("Copiar comando", self)
+            iconos.asignar(self.boton_copiar, "copy")
+            self.boton_copiar.clicked.connect(self.copiar)
+            fila.addWidget(self.boton_copiar)
+            self.boton_ver = QToolButton(self)
+            self.boton_ver.setToolTip("Ver el comando")
+            self.boton_ver.setAccessibleName("Ver el comando")
+            self.boton_ver.setCheckable(True)
+            iconos.asignar(self.boton_ver, "chevron-down")
+            fila.addWidget(self.boton_ver)
+        fila.addStretch(1)
+        if fila.count() > 1:
+            capa.addLayout(fila)
+        if faltante.comando:
             self.texto_comando = QPlainTextEdit(faltante.comando, self)
             self.texto_comando.setReadOnly(True)
             self.texto_comando.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-            fuente_mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-            fuente_mono.setPointSize(9)
-            self.texto_comando.setFont(fuente_mono)
+            mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+            self.texto_comando.setFont(mono)
             lineas = faltante.comando.count("\n") + 1
-            alto = self.texto_comando.fontMetrics().lineSpacing() * min(lineas, 10) + 22
-            self.texto_comando.setFixedHeight(alto)
+            self.texto_comando.setFixedHeight(self.texto_comando.fontMetrics().lineSpacing() * min(lineas, 9) + 18)
+            self.texto_comando.setVisible(False)
+            self.boton_ver.toggled.connect(self.texto_comando.setVisible)
             capa.addWidget(self.texto_comando)
-            fila = QHBoxLayout()
-            self.boton_copiar = QPushButton("Copiar", self)
-            self.boton_copiar.clicked.connect(self.copiar)
-            self.aviso_copiado = QLabel("", self)
-            fila.addWidget(self.boton_copiar)
-            fila.addWidget(self.aviso_copiado, 1)
-            capa.addLayout(fila)
+        self.aviso = QLabel("", self)
+        self.aviso.setObjectName("texto_suave")
+        capa.addWidget(self.aviso)
+        self.aviso.hide()
 
     def copiar(self) -> None:
         QGuiApplication.clipboard().setText(self.faltante.comando or "")
-        self.aviso_copiado.setText("Copiado. Pegalo en PowerShell y apretá Enter.")
+        self.aviso.setText("Copiado. Pegalo en PowerShell y apretá Enter.")
+        self.aviso.show()
 
 
 class PanelFaltantes(QWidget):
     rechequear = Signal()
-    reemplazar_fuente = Signal(str)     # nombre de la fuente del PDF (vacío = elegir en el diálogo)
+    instalar = Signal(object)            # Faltante
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._generales: list[Faltante] = []
         self._de_documento: list[Faltante] = []
-
-        self.pestanas = QTabWidget(self)
-
-        # Pestaña 1: faltantes
-        pagina = QWidget()
-        capa_pag = QVBoxLayout(pagina)
-        fila = QHBoxLayout()
-        self.resumen = QLabel("", pagina)
-        self.resumen.setWordWrap(True)
-        boton = QPushButton("Volver a chequear", pagina)
+        encabezado = QHBoxLayout()
+        encabezado.addWidget(encabezado_panel("Faltantes", self), 1)
+        boton = QToolButton(self)
+        boton.setToolTip("Volver a chequear")
+        boton.setAccessibleName("Volver a chequear")
+        iconos.asignar(boton, "refresh-cw")
         boton.clicked.connect(self.rechequear.emit)
-        fila.addWidget(self.resumen, 1)
-        fila.addWidget(boton)
-        capa_pag.addLayout(fila)
-        self.scroll = QScrollArea(pagina)
+        encabezado.addWidget(boton)
+        self.resumen = QLabel("", self)
+        self.resumen.setObjectName("texto_suave")
+        self.resumen.setWordWrap(True)
+        self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.contenedor = QWidget()
         self.capa_tarjetas = QVBoxLayout(self.contenedor)
+        self.capa_tarjetas.setContentsMargins(0, 0, 4, 0)
+        self.capa_tarjetas.setSpacing(8)
         self.capa_tarjetas.addStretch(1)
         self.scroll.setWidget(self.contenedor)
-        capa_pag.addWidget(self.scroll, 1)
-        self.pestanas.addTab(pagina, "Faltantes")
-
-        # Pestaña 2: fuentes del documento
-        self.tabla = QTableWidget(0, 4, self)
-        self.tabla.setHorizontalHeaderLabels(["Fuente", "Embebido", "En Windows", "Páginas"])
-        self.tabla.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in (1, 2, 3):
-            self.tabla.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
-        self.tabla.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tabla.verticalHeader().setVisible(False)
-        self.tabla.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        pagina_fuentes = QWidget()
-        capa_fuentes = QVBoxLayout(pagina_fuentes)
-        capa_fuentes.setContentsMargins(0, 0, 0, 0)
-        capa_fuentes.addWidget(self.tabla, 1)
-        self.boton_reemplazar = QPushButton("Reemplazar fuente en todo el documento…", pagina_fuentes)
-        self.boton_reemplazar.setToolTip("Para PDFs con fuentes privadas o recortadas: deja el documento uniforme "
-                                         "y editable con una fuente libre equivalente.")
-        self.boton_reemplazar.clicked.connect(self._pedir_reemplazo)
-        capa_fuentes.addWidget(self.boton_reemplazar)
-        self.pestanas.addTab(pagina_fuentes, "Fuentes del documento")
-
         capa = QVBoxLayout(self)
-        capa.setContentsMargins(4, 4, 4, 4)
-        capa.addWidget(self.pestanas)
+        capa.setContentsMargins(10, 10, 6, 10)
+        capa.addLayout(encabezado)
+        capa.addWidget(self.resumen)
+        capa.addWidget(self.scroll, 1)
+        gestor().cambio.connect(self._redibujar)
 
-    # ------------------------------------------------------------------ datos
     def set_generales(self, faltantes: list[Faltante]) -> None:
         self._generales = faltantes
         self._redibujar()
 
-    def set_documento(self, fuentes: list[InfoFuente] | None, faltantes: list[Faltante]) -> None:
+    def set_documento(self, faltantes: list[Faltante]) -> None:
         self._de_documento = faltantes
-        self._llenar_tabla(fuentes or [])
         self._redibujar()
 
     @property
@@ -150,7 +162,9 @@ class PanelFaltantes(QWidget):
         orden = {Importancia.NECESARIO: 0, Importancia.RECOMENDADO: 1, Importancia.OPCIONAL: 2}
         todos = sorted(self.faltantes, key=lambda f: orden[f.importancia])
         for f in todos:
-            self.capa_tarjetas.insertWidget(self.capa_tarjetas.count() - 1, TarjetaFaltante(f, self.contenedor))
+            tarjeta = TarjetaFaltante(f, self.contenedor)
+            tarjeta.instalar.connect(self.instalar.emit)
+            self.capa_tarjetas.insertWidget(self.capa_tarjetas.count() - 1, tarjeta)
         if not todos:
             self.resumen.setText("No falta nada. Todo listo.")
         else:
@@ -158,36 +172,68 @@ class PanelFaltantes(QWidget):
             texto = f"{len(todos)} elemento(s) faltante(s)"
             if necesarios:
                 texto += f", {necesarios} necesario(s)"
-            self.resumen.setText(texto + ". Copiá el comando y pegalo en PowerShell.")
+            self.resumen.setText(texto + ". Podés instalarlos desde acá o copiar el comando.")
+
+
+class PanelFuentes(QWidget):
+    reemplazar_fuente = Signal(str)     # nombre de la fuente del PDF (vacío = elegir en el diálogo)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.tabla = QTableWidget(0, 3, self)
+        self.tabla.setHorizontalHeaderLabels(["Fuente", "Embebido", "En Windows"])
+        self.tabla.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2):
+            self.tabla.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        self.tabla.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla.verticalHeader().setVisible(False)
+        self.tabla.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla.setShowGrid(False)
+        self.tabla.setWordWrap(True)
+        self.boton_reemplazar = QPushButton("Reemplazar en todo el documento…", self)
+        iconos.asignar(self.boton_reemplazar, "replace")
+        self.boton_reemplazar.setToolTip("Para PDFs con fuentes privadas o recortadas: deja el documento uniforme "
+                                         "y editable con una fuente libre equivalente.")
+        self.boton_reemplazar.clicked.connect(self._pedir_reemplazo)
+        self.titulo = encabezado_panel("Fuentes del documento", self)
+        capa = QVBoxLayout(self)
+        capa.setContentsMargins(10, 10, 6, 10)
+        capa.addWidget(self.titulo)
+        capa.addWidget(self.tabla, 1)
+        capa.addWidget(self.boton_reemplazar)
 
     def _pedir_reemplazo(self) -> None:
         fila = self.tabla.currentRow()
         item = self.tabla.item(fila, 0) if fila >= 0 else None
         self.reemplazar_fuente.emit(item.text() if item is not None else "")
 
-    def _llenar_tabla(self, fuentes: list[InfoFuente]) -> None:
+    def set_fuentes(self, fuentes: list[InfoFuente] | None) -> None:
+        fuentes = fuentes or []
+        p = gestor().paleta
         self.tabla.setRowCount(len(fuentes))
         for fila, f in enumerate(fuentes):
             if f.instalada:
                 en_windows = "Instalada"
             elif f.incluida:
-                en_windows = "No (incluida con PDF Studio)"
+                en_windows = "Incluida con PDF Studio"
             elif f.es_estandar:
-                en_windows = "No hace falta (estándar PDF)"
+                en_windows = "No hace falta (estándar)"
             elif f.embebido == Embebido.TYPE3:
                 en_windows = "—"
             else:
                 en_windows = "No instalada"
-            paginas = ", ".join(str(p + 1) for p in f.paginas[:8]) + ("…" if len(f.paginas) > 8 else "")
-            valores = [f.nombre, f.embebido.texto, en_windows, paginas]
-            for col, valor in enumerate(valores):
+            embebido = {Embebido.COMPLETA: "Completa", Embebido.SUBCONJUNTO: "Recortada",
+                        Embebido.NO_EMBEBIDA: "No embebida", Embebido.TYPE3: "Type 3"}[f.embebido]
+            paginas = ", ".join(str(n + 1) for n in f.paginas[:8]) + ("…" if len(f.paginas) > 8 else "")
+            for col, valor in enumerate((f.nombre, embebido, en_windows)):
                 item = QTableWidgetItem(valor)
-                if col == 0:
-                    item.setToolTip(f"{f.nombre_pdf}\nTipo: {f.tipo}"
-                                    + (f"\nArchivo: {f.instalada.archivo}" if f.instalada else ""))
+                item.setToolTip(f"{f.nombre_pdf}\n{f.embebido.texto}\nTipo: {f.tipo}\nPáginas: {paginas}"
+                                + (f"\nArchivo: {f.instalada.archivo}" if f.instalada else ""))
                 if col == 1 and f.embebido == Embebido.SUBCONJUNTO and not (f.instalada or f.incluida):
-                    item.setForeground(Qt.GlobalColor.darkYellow)
+                    item.setForeground(QColor(p.aviso))
                 if col == 2 and en_windows == "No instalada":
-                    item.setForeground(Qt.GlobalColor.red)
+                    item.setForeground(QColor(p.peligro))
                 self.tabla.setItem(fila, col, item)
-        self.pestanas.setTabText(1, f"Fuentes del documento ({len(fuentes)})")
+        self.tabla.resizeRowsToContents()
+        self.titulo.setText(f"Fuentes del documento ({len(fuentes)})" if fuentes else "Fuentes del documento")
+

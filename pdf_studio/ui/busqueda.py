@@ -7,6 +7,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QToolButton, QWidget
 
 from pdf_studio.core.documento import Documento
+from pdf_studio.ui import iconos
 
 
 def buscar_en_documento(doc: pymupdf.Document, texto: str) -> list[tuple[int, pymupdf.Rect]]:
@@ -38,9 +39,15 @@ class BarraBusqueda(QWidget):
         self.campo.textChanged.connect(self._texto_cambiado)
         self.etiqueta = QLabel("", self)
         self.etiqueta.setMinimumWidth(90)
-        b_ant = QToolButton(self, text="▲", toolTip="Anterior (Shift+Enter)")
-        b_sig = QToolButton(self, text="▼", toolTip="Siguiente (Enter)")
-        b_cerrar = QToolButton(self, text="✕", toolTip="Cerrar (Esc)")
+        b_ant = QToolButton(self, toolTip="Anterior (Shift+Enter)")
+        b_sig = QToolButton(self, toolTip="Siguiente (Enter)")
+        b_cerrar = QToolButton(self, toolTip="Cerrar búsqueda (Esc)")
+        for boton, icono, nombre in ((b_ant, "chevron-up", "Resultado anterior"),
+                                     (b_sig, "chevron-down", "Resultado siguiente"),
+                                     (b_cerrar, "x", "Cerrar búsqueda")):
+            iconos.asignar(boton, icono)
+            boton.setAccessibleName(nombre)
+        self.campo.setAccessibleName("Texto a buscar")
         b_ant.clicked.connect(self.anterior)
         b_sig.clicked.connect(self.siguiente)
         b_cerrar.clicked.connect(self.cerrar)
@@ -48,8 +55,10 @@ class BarraBusqueda(QWidget):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.cerrar)
 
         capa = QHBoxLayout(self)
-        capa.setContentsMargins(6, 3, 6, 3)
-        capa.addWidget(QLabel("Buscar:", self))
+        capa.setContentsMargins(10, 6, 10, 6)
+        lupa = QLabel(self)
+        lupa.setPixmap(iconos.crear_icono("search").pixmap(18, 18))
+        capa.addWidget(lupa)
         capa.addWidget(self.campo, 1)
         capa.addWidget(b_ant)
         capa.addWidget(b_sig)

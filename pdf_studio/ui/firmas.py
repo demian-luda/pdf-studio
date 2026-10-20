@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from pdf_studio.core.imagenes import (BibliotecaFirmas, OpcionesFondo, luminancia, quitar_fondo,
                                       umbral_automatico)
+from pdf_studio.ui import iconos
+from pdf_studio.ui.tema import gestor
 
 COLORES_TINTA = [("Color original", None), ("Negro", (20, 20, 20)), ("Azul lapicera", (18, 45, 140))]
 LADO_VISTA_PREVIA = 700
@@ -56,7 +58,7 @@ class DialogoQuitarFondo(QDialog):
         for v in (self.vista_original, self.vista_resultado):
             v.setMinimumSize(320, 200)
             v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            v.setStyleSheet("border: 1px solid #888;")
+            v.setStyleSheet(f"border: 1px solid {gestor().paleta.borde}; border-radius: 6px;")
 
         self.umbral = QSlider(Qt.Orientation.Horizontal, self)
         self.umbral.setRange(30, 250)
@@ -93,6 +95,7 @@ class DialogoQuitarFondo(QDialog):
 
         botones = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         botones.button(QDialogButtonBox.StandardButton.Ok).setText("Guardar en la biblioteca")
+        botones.button(QDialogButtonBox.StandardButton.Ok).setProperty("primario", True)
         botones.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
         botones.accepted.connect(self.aceptar)
         botones.rejected.connect(self.reject)
@@ -152,9 +155,13 @@ class PanelFirmas(QWidget):
         self.lista.currentItemChanged.connect(lambda *_: self._actualizar_botones())
 
         self.b_insertar = QPushButton("Insertar en la página", self)
+        self.b_insertar.setProperty("primario", True)
         self.b_agregar = QPushButton("Agregar firma…", self)
         self.b_fondo = QPushButton("Quitar fondo…", self)
         self.b_eliminar = QPushButton("Eliminar", self)
+        for boton, icono in ((self.b_insertar, "image-plus"), (self.b_agregar, "plus"), (self.b_fondo, "eraser"),
+                             (self.b_eliminar, "trash")):
+            iconos.asignar(boton, icono)
         self.b_insertar.clicked.connect(lambda: self._con_seleccion(self.insertar))
         self.b_agregar.clicked.connect(self.agregar.emit)
         self.b_fondo.clicked.connect(lambda: self._con_seleccion(self.quitar_fondo_de))
@@ -169,7 +176,10 @@ class PanelFirmas(QWidget):
         ayuda.setWordWrap(True)
         fila_col = QHBoxLayout()
         self.b_aplicar = QPushButton("Aplicar (Enter)", self.caja_colocacion)
+        self.b_aplicar.setProperty("primario", True)
         self.b_cancelar = QPushButton("Cancelar (Esc)", self.caja_colocacion)
+        iconos.asignar(self.b_aplicar, "check")
+        iconos.asignar(self.b_cancelar, "x")
         self.b_aplicar.clicked.connect(self.aplicar_colocacion.emit)
         self.b_cancelar.clicked.connect(self.cancelar_colocacion.emit)
         fila_col.addWidget(self.b_aplicar)
@@ -178,7 +188,8 @@ class PanelFirmas(QWidget):
         capa_col.addLayout(fila_col)
         self.caja_colocacion.hide()
 
-        self.etiqueta_carpeta = QLabel(f"<small>Carpeta: {biblioteca.carpeta}</small>", self)
+        self.etiqueta_carpeta = QLabel(f"Carpeta: {biblioteca.carpeta}", self)
+        self.etiqueta_carpeta.setObjectName("texto_suave")
         self.etiqueta_carpeta.setWordWrap(True)
         self.etiqueta_carpeta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 

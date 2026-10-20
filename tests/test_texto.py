@@ -343,12 +343,16 @@ def test_dialogo_muestra_comando_de_fuente_libre(qtbot):
     from pdf_studio.ui.edicion_texto import DialogoEditarTexto
     doc = pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf")
     bloque = bloque_en(doc[0], 0, pymupdf.Point(100, 131), Nivel.LINEA)
+    from pdf_studio.dependencias.catalogo_fuentes import buscar_libre
     analisis = AnalisisFuente("Roboto-Regular", Embebido.SUBCONJUNTO,
                               [OpcionFuente("original", "Roboto", "Fuente original del PDF", ["ñ"])],
-                              "winget-o-lo-que-sea", "SIL OFL 1.1")
+                              buscar_libre("Roboto-Regular"))
     dialogo = DialogoEditarTexto(bloque, lambda t: analisis)
     qtbot.addWidget(dialogo)
     dialogo.show()
-    assert dialogo.caja_instalar.isVisible()
-    assert dialogo.comando.toPlainText() == "winget-o-lo-que-sea"
+    assert dialogo.fila_instalar is not None and dialogo.fila_instalar.isVisible()
+    dialogo.boton_copiar.click()
+    from PySide6.QtGui import QGuiApplication
+    assert "google/fonts/contents/ofl/roboto" in QGuiApplication.clipboard().text()
+    assert not dialogo.boton_instalar.isEnabled()      # sin función de instalación no se ofrece
     assert not dialogo.botones.button(dialogo.botones.StandardButton.Ok).isEnabled()

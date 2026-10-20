@@ -30,6 +30,7 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
 3. **Fidelidad visual verificable.** Después de cada guardado, se compara el render de las páginas no editadas contra el original (diferencia de píxeles = 0). Si hay diferencia, se avisa.
 4. **Deshacer/Rehacer** en todas las operaciones de edición.
 5. **Nunca fallar en silencio.** Si falta una fuente, librería o herramienta, se muestra qué falta y el **comando de PowerShell listo para copiar** que lo instala.
+6. **Instalación asistida, siempre con confirmación explícita.** La app puede instalar dependencias por su cuenta (botón "Instalar"), pero nunca sin que el usuario confirme después de ver: nombre, origen de la descarga, licencia, tamaño y dónde se instala. Siempre se ofrece también "Copiar comando". Las fuentes se instalan solo para el usuario (sin administrador) y quedan disponibles sin reiniciar; si Windows necesita permisos de administrador (Tesseract, Ghostscript), se deja que aparezca su propio aviso.
 
 ## Stack
 
@@ -66,6 +67,7 @@ pdf_studio/
     lotes.py
   dependencias/
     chequeo.py            # detector de dependencias + comandos PowerShell
+    instalador.py         # instalación asistida (con confirmación)
   tests/
     pdfs_prueba/          # PDFs de ejemplo variados
 ```
@@ -156,3 +158,20 @@ Armar en `tests/pdfs_prueba/` un set variado: un PDF exportado desde Word, uno e
 - Avanzar fase por fase. Al terminar cada fase, resumir qué se hizo y cómo probarlo, y esperar la confirmación del usuario.
 - Antes de instalar algo, mostrar el comando y explicar para qué sirve.
 - Si una función no puede garantizar la fidelidad en un caso concreto, avisarle al usuario en la interfaz en vez de guardar un resultado defectuoso.
+
+## Diseño de interfaz
+
+Reglas para todas las fases (implementadas en `ui/tema.py`, `ui/iconos.py`, `ui/cinta.py`):
+
+- **Estética moderna y minimalista.** Superficies planas, esquinas redondeadas, separadores finos, sin decoraciones innecesarias. Un solo color de acento (azul) para selección, foco y acción principal.
+- **Temas claro y oscuro**, con selector y opción "según Windows" (sigue el cambio en vivo). Los colores salen SOLO de las paletas de `ui/tema.py`; ningún widget hardcodea colores.
+- **Contraste WCAG AA** verificado por tests: texto ≥ 4.5:1 sobre cualquier superficie; contornos de controles y anillo de foco ≥ 3:1.
+- **Íconos en todas las acciones**, del set Lucide (SVG en `pdf_studio/recursos/iconos`, licencia ISC), coloreados según el tema. Si una acción nueva necesita un ícono que no está, bajarlo del mismo set (tag fijo) y agregarlo al proyecto. Nunca mezclar otros sets.
+- **Tooltips con nombre + atajo de teclado** (y la descripción si ayuda). Deshacer/Rehacer muestran en el tooltip qué acción deshacen.
+- **Organización por pestañas** (Ver, Editar, Firmar, Páginas, Herramientas) con íconos y texto debajo; acceso rápido fijo a Abrir, Guardar, Más opciones, Deshacer y Rehacer. Cada acción nueva va a la pestaña que corresponda, nunca en una fila larga de texto.
+- **Barra lateral** con selector de íconos (Páginas, Fuentes, Faltantes) y **barra de estado discreta** (texto chico y suave; los faltantes como indicador clickeable).
+- **Paleta de comandos (Ctrl+K):** toda acción nueva se crea con `_accion(...)` para que aparezca ahí, con su grupo.
+- **Accesibilidad:** todo usable con teclado (Tab, Alt+1…5 para pestañas, F6 entre regiones, atajos), foco siempre visible, nombres accesibles en botones con solo ícono, y tamaño de interfaz escalable (Ctrl+Alt+= / - / 0) que afecta texto e íconos.
+- **Botón principal** de cada diálogo con `setProperty("primario", True)`; lo destructivo o irreversible nunca es el botón por defecto.
+- **Anotaciones discretas:** lo que la app dibuja sobre la página (notas, marcas) no debe tapar el contenido.
+- **Logo:** `recursos/logo.svg` (fuente) → `logo.ico` multi-resolución y PNGs con `herramientas/generar_iconos_app.py`. Se usa en la ventana, la barra de tareas y "Acerca de".

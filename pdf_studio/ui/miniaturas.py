@@ -78,7 +78,17 @@ class PanelMiniaturas(QListWidget):
             pintor.setPen(QColor(0, 0, 0, 80))
             pintor.drawRect(0, 0, img.width() - 1, img.height() - 1)
             pintor.end()
-            self.item(i).setIcon(QIcon(img))
+            icono = QIcon()
+            # El mismo dibujo seleccionada o no: Qt teñiría la página con el color de selección
+            for modo in (QIcon.Mode.Normal, QIcon.Mode.Selected, QIcon.Mode.Active):
+                icono.addPixmap(img, modo)
+            self.item(i).setIcon(icono)
+
+    def resizeEvent(self, evento) -> None:
+        super().resizeEvent(evento)
+        # Celdas del ancho del panel: las miniaturas quedan centradas
+        alto = self.iconSize().height() + self.fontMetrics().height() + 16
+        self.setGridSize(QSize(max(self.iconSize().width() + 16, self.viewport().width() - 4), alto))
 
     @property
     def renderizado_completo(self) -> bool:

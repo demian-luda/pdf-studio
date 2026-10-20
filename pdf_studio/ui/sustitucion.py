@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 from pdf_studio.core.fuentes import Embebido, IndiceFuentesSistema
 from pdf_studio.core.sustitucion import (UMBRAL_AJUSTE, Candidata, FamiliaEnUso, PlanSustitucion, candidatas,
                                          familias_del_documento, planificar_sustitucion, vista_previa)
+from pdf_studio.ui import iconos
 from pdf_studio.ui.visor import pixmap_a_qimage
 
 DPI_PREVIA = 80
@@ -74,6 +75,7 @@ class DialogoSustitucion(QDialog):
         self.ajustar.setChecked(True)
         self.ajustar.toggled.connect(self._invalidar)
         self.boton_previa = QPushButton("Generar vista previa", self)
+        iconos.asignar(self.boton_previa, "eye")
         self.boton_previa.clicked.connect(self.generar_previa)
 
         # Vista previa lado a lado
@@ -107,6 +109,8 @@ class DialogoSustitucion(QDialog):
         self.lista_ajustes.itemClicked.connect(lambda it: self.pagina.setValue(it.data(Qt.ItemDataRole.UserRole) + 1))
 
         self.boton_aplicar = QPushButton("Aplicar", self)
+        self.boton_aplicar.setProperty("primario", True)
+        iconos.asignar(self.boton_aplicar, "check")
         self.boton_aplicar.setEnabled(False)
         self.boton_aplicar.clicked.connect(self.accept)
         cancelar = QPushButton("Cancelar", self)

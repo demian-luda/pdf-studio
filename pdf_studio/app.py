@@ -23,14 +23,26 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError as e:
             return _falta_paquete(paquete, e)
 
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from pdf_studio import NOMBRE_APP
+    from pdf_studio.config import DIR_RECURSOS
+    from pdf_studio.ui.tema import gestor
     from pdf_studio.ui.ventana_principal import VentanaPrincipal
+
+    # Windows agrupa la ventana con su propio ícono en la barra de tareas (y no con el de Python)
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PDFStudio.EditorPDF")
+    except (AttributeError, OSError):
+        pass
 
     app = QApplication(argv)
     app.setApplicationName(NOMBRE_APP)
     app.setOrganizationName("PDFStudio")
+    app.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
+    gestor().aplicar()
 
     def excepcion_no_controlada(tipo, valor, tb):
         # Nunca fallar en silencio: cualquier error inesperado se muestra

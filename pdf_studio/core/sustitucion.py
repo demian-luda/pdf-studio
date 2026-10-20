@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 import pymupdf
 
 from pdf_studio.core.documento import ErrorDocumento, Operacion
-from pdf_studio.core.fuentes import (Embebido, FuenteSistema, IndiceFuentesSistema, clasificar_embebido,
-                                     familia_de, separar_nombre, sin_prefijo)
+from pdf_studio.core.fuentes import (Embebido, FuenteSistema, IndiceFuentesSistema, clase_tipografica,
+                                     clasificar_fuente, estilo_de, familia_de, separar_nombre, sin_prefijo)
 from pdf_studio.core.pdfutil import independizar_recursos
 from pdf_studio.core.texto import (F_ITALICA, F_MONO, F_NEGRITA, F_SERIF, Linea, LineaADibujar, Tramo,
                                    _clave_glifo, _espaciado, _franja_borrado, borrar_texto, bytes_de_fuente,
@@ -37,15 +37,6 @@ INCLUIDAS_POR_CLASE = {"sans": "Liberation Sans", "serif": "Liberation Serif", "
 OTRAS_INCLUIDAS = ["Carlito", "Caladea"]
 WINDOWS_COMUNES = ["Arial", "Times New Roman", "Courier New", "Calibri", "Cambria", "Georgia", "Verdana",
                    "Segoe UI", "Tahoma", "Garamond", "Book Antiqua"]
-CLASE_DE = {
-    "Liberation Sans": "sans", "Carlito": "sans", "Arial": "sans", "Calibri": "sans", "Verdana": "sans",
-    "Segoe UI": "sans", "Tahoma": "sans",
-    "Liberation Serif": "serif", "Caladea": "serif", "Times New Roman": "serif", "Cambria": "serif",
-    "Georgia": "serif", "Garamond": "serif", "Book Antiqua": "serif",
-    "Liberation Mono": "mono", "Courier New": "mono",
-}
-
-
 # ---------------------------------------------------------------------- inventario
 @dataclass
 class FamiliaEnUso:
@@ -59,11 +50,7 @@ class FamiliaEnUso:
 
     @property
     def clase(self) -> str:
-        if self.flags & F_MONO:
-            return "mono"
-        if self.flags & F_SERIF:
-            return "serif"
-        return "sans"
+        return clase_tipografica(min(self.nombres_pdf, key=len) if self.nombres_pdf else self.nombre, self.flags)
 
     @property
     def descripcion_embebido(self) -> str:
@@ -75,7 +62,8 @@ def familias_del_documento(doc: pymupdf.Document) -> list[FamiliaEnUso]:
     tipos = {}
     for pno in range(doc.page_count):
         for xref, ext, tipo, basefont, _r, _e in doc.get_page_fonts(pno):
-            tipos[sin_prefijo(basefont)] = clasificar_embebido(basefont, tipo, ext)
+            if sin_prefijo(basefont) not in tipos:
+                tipos[sin_prefijo(basefont)] = clasificar_fuente(doc, xref, basefont, tipo, ext)
     for pno, pag in enumerate(doc):
         for bloque in lineas_de_pagina(pag):
             for ln in bloque:
@@ -203,9 +191,11 @@ def candidatas(doc: pymupdf.Document, familia: FamiliaEnUso, incluidas: IndiceFu
             if len(por_letra) >= 20 and all(abs(fuente.glyph_advance(ord(ch)) - w) <= 0.005 * max(w, 0.1)
                                             for ch, w in por_letra.items()):
                 c.compatible = True
+    # Nunca se cambia de clase: una sans se reemplaza por una sans, una serif por una serif
+    resultado = [c for c in resultado if clase_tipografica(c.familia) == familia.clase]
     # Orden: la métricamente compatible primero; después, misma clase (serif/sans/mono)
     # y ancho medio más parecido; las incluidas antes que las de Windows a igual parecido
-    resultado.sort(key=lambda c: (not c.compatible, CLASE_DE.get(c.familia, familia.clase) != familia.clase,
+    resultado.sort(key=lambda c: (not c.compatible, False,
                                   round(abs(c.parecido - 1), 2), c.origen != "incluida"))
     return resultado
 
@@ -370,12 +360,7 @@ def posiciones_sustitucion(tr: Tramo, cod, fuente: pymupdf.Font, ajustar: bool) 
 
 
 def _estilo_tramo(tr: Tramo) -> str:
-    estilo = separar_nombre(tr.fuente)[1]
-    if estilo in ("bold", "italic", "bolditalic"):
-        return estilo
-    negrita = bool(tr.flags & F_NEGRITA) or "bold" in estilo or "black" in estilo or "heavy" in estilo
-    italica = bool(tr.flags & F_ITALICA) or "italic" in estilo or "oblique" in estilo
-    return {(True, True): "bolditalic", (True, False): "bold", (False, True): "italic"}.get((negrita, italica), "")
+    return estilo_de(tr.fuente, tr.flags)
 
 
 def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidata],

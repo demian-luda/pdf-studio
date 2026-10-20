@@ -6,6 +6,7 @@ Para cada fuente del PDF se informa:
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -307,15 +308,169 @@ def clasificar_embebido(nombre: str, tipo: str, extension: str) -> Embebido:
     return Embebido.COMPLETA
 
 
+# Letras que toda fuente de texto latina completa tiene
+LETRAS_BASICAS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _programa_vacio(programa: list) -> bool:
+    """Un charstring CFF sin trazos: solo números (ancho) y 'endchar'."""
+    return all(not isinstance(x, str) or x == "endchar" for x in programa)
+
+
+def letras_con_glifo(datos: bytes) -> tuple[set[str] | None, int]:
+    """(letras básicas que tienen un glifo con contorno real, cantidad total de glifos).
+    Las letras son None si el programa de fuente no trae un cmap usable."""
+    from fontTools.ttLib import TTFont
+    try:
+        f = TTFont(io.BytesIO(datos), lazy=True)
+        total = f["maxp"].numGlyphs
+    except Exception:
+        return _letras_cff(datos)
+    cmap = f.getBestCmap()
+    if not cmap:
+        return None, total
+    presentes: set[str] = set()
+    if "glyf" in f:
+        glyf = f["glyf"]
+        for ch in LETRAS_BASICAS:
+            nombre = cmap.get(ord(ch))
+            if nombre and nombre in glyf and glyf[nombre].numberOfContours != 0:
+                presentes.add(ch)
+    elif "CFF " in f:
+        charstrings = f["CFF "].cff.topDictIndex[0].CharStrings
+        for ch in LETRAS_BASICAS:
+            nombre = cmap.get(ord(ch))
+            if nombre and nombre in charstrings:
+                cs = charstrings[nombre]
+                cs.decompile()
+                if not _programa_vacio(cs.program):
+                    presentes.add(ch)
+    return presentes, total
+
+
+def _letras_cff(datos: bytes) -> tuple[set[str] | None, int]:
+    """Lo mismo para un CFF "pelado" (FontFile3): se usan los nombres de glifo."""
+    from fontTools import agl
+    from fontTools.cffLib import CFFFontSet
+    try:
+        cff = CFFFontSet()
+        cff.decompile(io.BytesIO(datos), None)
+        charstrings = cff[cff.fontNames[0]].CharStrings
+    except Exception:
+        return None, 0
+    nombres = set(charstrings.keys())
+    if all(n.startswith("cid") or n == ".notdef" for n in nombres):
+        return None, len(nombres)          # CFF con CIDs: sin nombres no se sabe qué letra es cuál
+    presentes = set()
+    for ch in LETRAS_BASICAS:
+        nombre = agl.UV2AGL.get(ord(ch))
+        if nombre in nombres:
+            cs = charstrings[nombre]
+            cs.decompile()
+            if not _programa_vacio(cs.program):
+                presentes.add(ch)
+    return presentes, len(nombres)
+
+
+def es_subconjunto_por_cobertura(datos: bytes) -> bool | None:
+    """True si al programa de fuente le faltan letras básicas (está recortado aunque no
+    tenga el prefijo ABCDEF+). None si no se puede saber."""
+    letras, total = letras_con_glifo(datos)
+    if letras is None:
+        return (total < 150) if total else None
+    if not letras and total >= 200:
+        return False          # fuente de símbolos o de otro alfabeto, completa
+    return len(letras) < len(LETRAS_BASICAS)
+
+
+def clasificar_fuente(doc: pymupdf.Document, xref: int, nombre: str, tipo: str, extension: str) -> Embebido:
+    """Como clasificar_embebido, pero mirando la cobertura real de glifos: una fuente
+    embebida sin prefijo a la que le faltan letras es un subconjunto."""
+    base = clasificar_embebido(nombre, tipo, extension)
+    if base != Embebido.COMPLETA:
+        return base
+    try:
+        datos = doc.extract_font(xref)[3]
+    except Exception:
+        datos = b""
+    if datos and es_subconjunto_por_cobertura(datos):
+        return Embebido.SUBCONJUNTO
+    return base
+
+
+# ---------------------------------------------------------------------- clase tipográfica
+class Clase:
+    SANS = "sans"
+    SERIF = "serif"
+    MONO = "mono"
+
+
+_MONO = ("mono", "courier", "consol", "code", "typewriter", "fixed", "lucidaconsole", "menlo", "inconsolata")
+_SANS = ("sans", "arial", "helvetica", "calibri", "carlito", "verdana", "tahoma", "segoe", "roboto", "lato",
+         "montserrat", "frutiger", "futura", "gill", "univers", "myriad", "trebuchet", "centurygothic", "candara",
+         "corbel", "aptos", "inter", "ubuntu", "raleway", "poppins", "nunito", "franklin", "avenir", "dejavusans",
+         "liberationsans", "arimo", "notosans", "sourcesans", "ptsans", "worksans", "manrope", "lexend")
+_SERIF = ("serif", "times", "tinos", "georgia", "garamond", "cambria", "caladea", "palatino", "bookantiqua",
+          "minion", "baskerville", "bodoni", "centuryschoolbook", "constantia", "didot", "merriweather",
+          "lora", "crimson", "gelasio", "charter", "cochin", "plantin", "sabon", "caslon", "bookman")
+
+
+def clase_tipografica(nombre: str, flags: int = 0, datos: bytes | None = None) -> str:
+    """sans / serif / mono, en este orden de confianza: nombre de la familia, datos del
+    programa de fuente (PANOSE, ancho fijo) y, por último, los flags del PDF (que muchos
+    generadores llenan mal)."""
+    familia = familia_de(nombre)
+    if any(k in familia for k in _MONO):
+        return Clase.MONO
+    # 'sans' antes que 'serif': "DejaVuSans", "Liberation Sans", "PT Sans"...
+    if any(k in familia for k in _SANS):
+        return Clase.SANS
+    if any(k in familia for k in _SERIF):
+        return Clase.SERIF
+    if datos:
+        try:
+            from fontTools.ttLib import TTFont
+            f = TTFont(io.BytesIO(datos), lazy=True)
+            if "post" in f and f["post"].isFixedPitch:
+                return Clase.MONO
+            if "OS/2" in f:
+                panose = f["OS/2"].panose
+                if panose.bFamilyType == 2:
+                    if panose.bProportion == 9:
+                        return Clase.MONO
+                    if panose.bSerifStyle in (11, 12, 13):
+                        return Clase.SANS
+                    if 2 <= panose.bSerifStyle <= 10:
+                        return Clase.SERIF
+        except Exception:
+            pass
+    if flags & 8:
+        return Clase.MONO
+    if flags & 4:
+        return Clase.SERIF
+    return Clase.SANS
+
+
+def estilo_de(nombre: str, flags: int = 0) -> str:
+    """'', 'bold', 'italic' o 'bolditalic', según el nombre y los flags."""
+    estilo = separar_nombre(nombre)[1]
+    negrita = bool(flags & 16) or any(k in estilo for k in ("bold", "black", "heavy", "semibold", "demibold"))
+    italica = bool(flags & 2) or any(k in estilo for k in ("italic", "oblique"))
+    return {(True, True): "bolditalic", (True, False): "bold", (False, True): "italic"}.get((negrita, italica), "")
+
+
 def analizar_fuentes(doc: pymupdf.Document,
                      indice: IndiceFuentesSistema | None = None,
                      incluidas: IndiceFuentesSistema | None = None) -> list[InfoFuente]:
     """Lista las fuentes del documento, agrupadas por nombre y tipo de embebido."""
     grupos: dict[tuple[str, Embebido], InfoFuente] = {}
+    clasificadas: dict[int, Embebido] = {}
     for pno in range(doc.page_count):
         for xref, ext, tipo, basefont, _ref, _enc in doc.get_page_fonts(pno):
             nombre_pdf = basefont or f"(sin nombre, xref {xref})"
-            emb = clasificar_embebido(nombre_pdf, tipo, ext)
+            if xref not in clasificadas:
+                clasificadas[xref] = clasificar_fuente(doc, xref, nombre_pdf, tipo, ext)
+            emb = clasificadas[xref]
             clave = (sin_prefijo(nombre_pdf), emb)
             info = grupos.get(clave)
             if info is None:

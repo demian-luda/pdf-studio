@@ -12,6 +12,13 @@ from pdf_studio.core.documento import Operacion
 
 AMARILLO = (1.0, 0.92, 0.23)
 
+# Apariencia de las notas: un globito chico (unos 11 x 10 pt) y semitransparente, arriba a la
+# izquierda del área de 16 x 16 pt que exige MuPDF. El ícono "Note" estándar tapaba el texto.
+APARIENCIA_NOTA = (b"q /G gs 0.95 0.76 0.31 rg 0.62 0.45 0.08 RG 0.5 w "
+                   b"3.5 15.5 m 11.5 15.5 l 12.6 15.5 13.5 14.6 13.5 13.5 c 13.5 9.5 l 13.5 8.4 12.6 7.5 11.5 7.5 c "
+                   b"6.5 7.5 l 4.5 5.5 l 4.5 7.5 l 3.4 7.5 2.5 8.4 2.5 9.5 c 2.5 13.5 l 2.5 14.6 3.4 15.5 4.5 15.5 c "
+                   b"h B Q")
+
 
 class AgregarResaltado(Operacion):
     nombre = "Resaltar"
@@ -49,9 +56,17 @@ class AgregarNota(Operacion):
 
     def aplicar(self, doc: pymupdf.Document) -> None:
         pag = doc[self.pagina]
-        annot = pag.add_text_annot(self.punto, self.texto, icon="Note")
+        annot = pag.add_text_annot(self.punto, self.texto, icon="Comment")
         annot.set_info(title=NOMBRE_APP)
         annot.update()
+        # Apariencia propia, más chica y discreta que la de MuPDF
+        tipo, valor = doc.xref_get_key(annot.xref, "AP/N")
+        if tipo == "xref":
+            xref = int(valor.split()[0])
+            doc.update_stream(xref, APARIENCIA_NOTA)
+            doc.xref_set_key(xref, "BBox", "[0 0 16 16]")
+            doc.xref_set_key(xref, "Matrix", "[1 0 0 1 0 0]")
+            doc.xref_set_key(xref, "Resources", "<</ExtGState<</G<</ca 0.9/CA 0.9>>>>>>")
 
     def paginas_afectadas(self) -> set[int]:
         return {self.pagina}

@@ -58,8 +58,9 @@ def test_compatibilidad_exige_igualdad_letra_por_letra(incluidas):
     with pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf") as doc:
         cands = {c.familia: c for c in candidatas(doc, familia(doc, "helvetica"), incluidas, None)}
     assert cands["Liberation Sans"].compatible
-    assert not cands["Liberation Serif"].compatible
     assert not cands["Carlito"].compatible
+    # Nunca se ofrece cambiar de clase: Helvetica (sans) no se reemplaza por una serif o mono
+    assert "Liberation Serif" not in cands and "Liberation Mono" not in cands and "Caladea" not in cands
 
 
 def test_compatible_no_mueve_nada(copia_pdf, tmp_path, incluidas):
@@ -95,10 +96,10 @@ def test_no_compatible_ajusta_ancho_y_lo_informa(copia_pdf, tmp_path, incluidas)
     d = Documento(copia_pdf("texto_varias_paginas.pdf"))
     try:
         extremos_antes = extremos_de_lineas(d.doc[0])
-        serif = next(c for c in candidatas(d.doc, familia(d.doc, "helvetica"), incluidas, None)
-                     if c.familia == "Liberation Serif")
-        plan = planificar_sustitucion(d.doc, {"helvetica": serif})
-        assert plan.ajustes, "Liberation Serif es más angosta: tiene que haber ajustes"
+        carlito = next(c for c in candidatas(d.doc, familia(d.doc, "helvetica"), incluidas, None)
+                       if c.familia == "Carlito")
+        plan = planificar_sustitucion(d.doc, {"helvetica": carlito})
+        assert plan.ajustes, "Carlito es más angosta: tiene que haber ajustes"
         assert all(abs(a.escala - 1) > UMBRAL_AJUSTE for a in plan.ajustes)
         assert "ajuste de ancho mayor" in plan.resumen()
         d.ejecutar(plan.operacion)
@@ -112,12 +113,12 @@ def test_no_compatible_ajusta_ancho_y_lo_informa(copia_pdf, tmp_path, incluidas)
 
 def test_sin_ajuste_de_ancho(incluidas):
     doc = pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf")
-    serif = next(c for c in candidatas(doc, familia(doc, "helvetica"), incluidas, None)
-                 if c.familia == "Liberation Serif")
-    plan = planificar_sustitucion(doc, {"helvetica": serif}, ajustar_ancho=False)
+    carlito = next(c for c in candidatas(doc, familia(doc, "helvetica"), incluidas, None)
+                   if c.familia == "Carlito")
+    plan = planificar_sustitucion(doc, {"helvetica": carlito}, ajustar_ancho=False)
     assert plan.ajustes == []
     plan.operacion.aplicar(doc)
-    assert {s["font"] for s in doc[0].get_texttrace()} == {"LiberationSerif", "LiberationSerif-Bold"}
+    assert {s["font"] for s in doc[0].get_texttrace()} == {"Carlito-Regular", "Carlito-Bold"}
 
 
 def test_deshacer_restaura_fuentes(copia_pdf, incluidas):

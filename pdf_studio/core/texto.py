@@ -26,7 +26,9 @@ import pymupdf
 
 from pdf_studio.core.codificacion import CodificadorFuente, construir_codificador
 from pdf_studio.core.documento import ErrorDocumento, Operacion
-from pdf_studio.core.fuentes import Embebido, IndiceFuentesSistema, clave_fuente, separar_nombre, sin_prefijo
+from pdf_studio.core.fuentes import (Embebido, IndiceFuentesSistema, clase_tipografica, clave_fuente, estilo_de,
+                                     familia_de, separar_nombre, sin_prefijo)
+from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
 from pdf_studio.core.pdfutil import (Ref, independizar_recursos, parsear_objeto, serializar_objeto,
                                      traducir_refs)
 
@@ -289,32 +291,46 @@ class OpcionFuente:
 class AnalisisFuente:
     nombre: str
     embebido: Embebido | None
-    opciones: list[OpcionFuente]
-    comando_instalacion: str | None = None    # si es libre y no está instalada
-    licencia: str | None = None
+    opciones: list[OpcionFuente]          # original, completa instalada/incluida, sustituta (en ese orden)
+    instalable: FuenteLibre | None = None   # libre y no instalada: se puede instalar desde la app
+    clase: str = "sans"
+    estilo: str = ""
 
     @property
     def recomendada(self) -> OpcionFuente | None:
         return next((o for o in self.opciones if o.disponible), None)
 
+    @property
+    def comando_instalacion(self) -> str | None:
+        return self.instalable.comando if self.instalable is not None else None
 
-def _estilo_de_flags(flags: int) -> str:
-    negrita, italica = bool(flags & F_NEGRITA), bool(flags & F_ITALICA)
-    return {(True, True): "bolditalic", (True, False): "bold", (False, True): "italic"}.get((negrita, italica), "")
+    @property
+    def licencia(self) -> str | None:
+        return self.instalable.licencia if self.instalable is not None else None
 
 
-def _elegir_estilo(caras, flags: int):
-    buscado = _estilo_de_flags(flags)
+# Sustitutas por clase tipográfica, de la preferida a la menos preferida
+SUSTITUTAS_POR_CLASE = {
+    "sans": ["Liberation Sans", "DejaVu Sans", "Carlito", "Arial"],
+    "serif": ["Liberation Serif", "DejaVu Serif", "Caladea", "Times New Roman"],
+    "mono": ["Liberation Mono", "DejaVu Sans Mono", "Courier New"],
+}
+
+
+def _cara_con_estilo(caras, estilo: str):
+    """La cara de la familia con exactamente ese estilo, o None (no se cambia peso ni estilo)."""
     for c in caras:
-        if separar_nombre(f"{c.familia},{c.estilo}")[1] == buscado:
+        if separar_nombre(f"{c.familia},{c.estilo}")[1] == estilo:
             return c
-    return caras[0] if caras else None
+    return None
 
 
 def analizar_fuente(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo, texto: str,
                     indice: IndiceFuentesSistema | None, incluidas: IndiceFuentesSistema | None,
                     cache: dict | None = None) -> AnalisisFuente:
-    """Opciones de fuente para escribir `texto` con el estilo del tramo, de mejor a peor."""
+    """Opciones de fuente para escribir `texto` con el estilo del tramo, de mejor a peor:
+    la original del PDF, la completa (instalada o incluida), instalarla si es libre y,
+    por último, una sustituta de la MISMA clase (sans/serif/mono), peso y estilo."""
     from pdf_studio.dependencias.catalogo_fuentes import buscar_comercial, buscar_libre
 
     opciones: list[OpcionFuente] = []
@@ -324,54 +340,73 @@ def analizar_fuente(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo, text
     if cod is not None:
         opciones.append(OpcionFuente("original", nombre, "Fuente original del PDF", cod.faltantes(texto),
                                      codificador=cod))
+    datos_programa = None
+    if cod is not None and cod.embebido not in (Embebido.NO_EMBEBIDA, Embebido.TYPE3):
+        try:
+            datos_programa = doc.extract_font(cod.xref)[3] or None
+        except Exception:
+            datos_programa = None
+    clase = clase_tipografica(nombre, tramo.flags, datos_programa)
+    estilo = estilo_de(tramo.fuente, tramo.flags)
 
-    def agregar(tipo: str, cara, descripcion: str, compatible: bool = False) -> None:
+    def opcion(tipo: str, cara, descripcion: str, compatible: bool = False) -> OpcionFuente | None:
         try:
             fuente = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
         except Exception:
-            return
+            return None
         faltan = [c for c in dict.fromkeys(texto) if c not in "\n\r " and not fuente.has_glyph(ord(c))]
-        opciones.append(OpcionFuente(tipo, cara.nombre_visible, descripcion, faltan, archivo=cara.archivo,
-                                     indice=cara.indice, metrica_compatible=compatible))
+        return OpcionFuente(tipo, cara.nombre_visible, descripcion, faltan, archivo=cara.archivo,
+                            indice=cara.indice, metrica_compatible=compatible)
 
     if indice is not None:
         cara = indice.buscar(nombre)
         if cara is not None:
-            agregar("sistema", cara, f"Fuente completa instalada en Windows ({Path(cara.archivo).name})", True)
+            o = opcion("sistema", cara, f"Fuente completa instalada en Windows ({Path(cara.archivo).name})", True)
+            if o is not None:
+                opciones.append(o)
     if incluidas is not None:
         cara = incluidas.buscar(nombre)
         if cara is not None:
-            agregar("incluida", cara, "Fuente completa incluida con PDF Studio", True)
+            o = opcion("incluida", cara, "Fuente completa incluida con PDF Studio", True)
+            if o is not None:
+                opciones.append(o)
 
     libre = buscar_libre(nombre)
     instalada = any(o.tipo in ("sistema", "incluida") for o in opciones)
-    comando = libre.comando if libre is not None and not instalada else None
+    instalable = libre if libre is not None and not instalada else None
 
-    # Sustituta: primero la métricamente compatible, si no por familia (serif/sans/mono)
+    # Sustituta: misma clase, peso y estilo; la más parecida en ancho a la original
     comercial = buscar_comercial(nombre)
-    candidatas = []
-    if comercial is not None:
-        candidatas.append((comercial.alternativa, comercial.metrica_compatible))
-    if tramo.flags & F_MONO:
-        candidatas.append(("Liberation Mono", False))
-    elif tramo.flags & F_SERIF:
-        candidatas.append(("Liberation Serif", False))
-    else:
-        candidatas.append(("Liberation Sans", False))
-    for familia, compatible in candidatas:
+    familias: list[tuple[str, bool]] = []
+    if comercial is not None and clase_tipografica(comercial.alternativa) == clase:
+        familias.append((comercial.alternativa, comercial.metrica_compatible))
+    familias += [(f, False) for f in SUSTITUTAS_POR_CLASE[clase] if f != (comercial.alternativa if comercial else None)]
+    muestra = [c for c in dict.fromkeys(tramo.texto) if c.strip()]
+    mejores: list[tuple[float, int, OpcionFuente]] = []
+    for orden, (familia, compatible) in enumerate(familias):
+        if familia_de(familia) == familia_de(nombre):
+            continue
         caras = []
         for idx in (incluidas, indice):
-            if idx is not None:
+            if idx is not None and not caras:
                 caras = idx.familia(familia)
-                if caras:
-                    break
-        cara = _elegir_estilo(caras, tramo.flags)
-        if cara is not None and not any(o.archivo == cara.archivo for o in opciones):
-            detalle = "mismo ancho por letra" if compatible else "parecida"
-            agregar("sustituta", cara, f"Sustituta: {cara.nombre_visible} ({detalle})", compatible)
-            break
-    return AnalisisFuente(nombre, embebido, opciones, comando, libre.licencia if libre else None)
-
+        cara = _cara_con_estilo(caras, estilo)
+        if cara is None or any(o.archivo == cara.archivo for o in opciones):
+            continue
+        detalle = "mismo ancho por letra" if compatible else "misma clase y estilo"
+        o = opcion("sustituta", cara, f"Sustituta: {cara.nombre_visible} ({detalle})", compatible)
+        if o is None:
+            continue
+        diferencia = 0.0
+        if cod is not None and muestra and not compatible:
+            fuente = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
+            orig = sum(cod.avance(c) for c in muestra)
+            nuevo = sum(fuente.glyph_advance(ord(c)) * 1000 for c in muestra)
+            diferencia = abs(nuevo / orig - 1) if orig else 0.0
+        mejores.append((0.0 if compatible else diferencia, orden, o))
+    if mejores:
+        opciones.append(min(mejores, key=lambda m: (m[0], m[1]))[2])
+    return AnalisisFuente(nombre, embebido, opciones, instalable, clase, estilo)
 
 # ---------------------------------------------------------------------- dibujo
 @dataclass

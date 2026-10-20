@@ -1,7 +1,7 @@
-"""Ventana principal: menús, barra de herramientas, visor, miniaturas, búsqueda y faltantes.
+"""Ventana principal: encabezado con cinta, barra lateral, visor, búsqueda y paneles.
 
-Todos los diálogos pasan por métodos _pedir_* / _informar / _preguntar para que los
-tests puedan reemplazarlos sin abrir ventanas modales.
+Todos los diálogos pasan por métodos _pedir_* / _informar / _preguntar / _confirmar_* para
+que los tests puedan reemplazarlos sin abrir ventanas modales.
 """
 from __future__ import annotations
 
@@ -9,30 +9,41 @@ from pathlib import Path
 
 from PIL import Image
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QImage, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QImage, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QProgressDialog, QVBoxLayout,
-                               QWidget)
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressDialog, QToolButton,
+                               QVBoxLayout, QWidget)
 
-from pdf_studio import NOMBRE_APP, __version__
+from pdf_studio import NOMBRE_APP
+from pdf_studio.config import DIR_RECURSOS
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado
 from pdf_studio.core.fuentes import familia_de, indice_incluidas, indice_sistema
-from pdf_studio.core.sustitucion import PlanSustitucion
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.paginas import RotarPagina
+from pdf_studio.core.sustitucion import PlanSustitucion
 from pdf_studio.core.texto import BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en, planificar
-from pdf_studio.dependencias.chequeo import chequear_fuentes, chequear_inicio
+from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_fuentes, chequear_inicio
+from pdf_studio.dependencias.instalador import Instalacion, instalacion_fuente
+from pdf_studio.ui import iconos
+from pdf_studio.ui.acerca import DialogoAcerca
+from pdf_studio.ui.barra_lateral import BarraLateral
 from pdf_studio.ui.busqueda import BarraBusqueda
+from pdf_studio.ui.cinta import Encabezado
 from pdf_studio.ui.colocacion import ImagenColocable
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
-from pdf_studio.ui.sustitucion import DialogoSustitucion
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
+from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
-from pdf_studio.ui.panel_faltantes import PanelFaltantes
+from pdf_studio.ui.paleta_comandos import PaletaComandos
+from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
+from pdf_studio.ui.sustitucion import DialogoSustitucion
+from pdf_studio.ui.tema import gestor
 from pdf_studio.ui.visor import Modo, Visor
+
+PESTANAS = ("Ver", "Editar", "Firmar", "Páginas", "Herramientas")
 
 
 class VentanaPrincipal(QMainWindow):
@@ -42,7 +53,9 @@ class VentanaPrincipal(QMainWindow):
         self.biblioteca = biblioteca if biblioteca is not None else BibliotecaFirmas()
         self.bloque: BloqueTexto | None = None        # texto seleccionado en modo Editar texto
         self._cache_fuentes: dict = {}
+        self._acciones: list[tuple[QAction, str]] = []   # (acción, grupo) para la paleta de comandos
         self.setWindowTitle(NOMBRE_APP)
+        self.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
         self.resize(1280, 860)
         self.setAcceptDrops(True)
 
@@ -58,161 +71,249 @@ class VentanaPrincipal(QMainWindow):
         capa.addWidget(self.visor, 1)
         self.setCentralWidget(centro)
 
-        # Paneles laterales
+        # Barra lateral (páginas / fuentes / faltantes)
         self.miniaturas = PanelMiniaturas(self)
-        self.dock_miniaturas = QDockWidget("Páginas", self)
-        self.dock_miniaturas.setObjectName("dock_miniaturas")
-        self.dock_miniaturas.setWidget(self.miniaturas)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_miniaturas)
-
+        self.panel_fuentes = PanelFuentes(self)
         self.faltantes = PanelFaltantes(self)
-        self.dock_faltantes = QDockWidget("Faltantes", self)
-        self.dock_faltantes.setObjectName("dock_faltantes")
-        self.dock_faltantes.setWidget(self.faltantes)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_faltantes)
+        self.lateral = BarraLateral(self)
+        self.dock_lateral = QDockWidget("Barra lateral", self)
+        self.dock_lateral.setObjectName("dock_lateral")
+        self.dock_lateral.setTitleBarWidget(QWidget())
+        self.dock_lateral.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.dock_lateral.setWidget(self.lateral)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_lateral)
+
+        # Panel de firmas (contextual, a la derecha)
         self.panel_firmas = PanelFirmas(self.biblioteca, self)
         self.dock_firmas = QDockWidget("Firmas", self)
         self.dock_firmas.setObjectName("dock_firmas")
         self.dock_firmas.setWidget(self.panel_firmas)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_firmas)
-        self.tabifyDockWidget(self.dock_faltantes, self.dock_firmas)
-        self.resizeDocks([self.dock_miniaturas, self.dock_faltantes], [170, 470], Qt.Orientation.Horizontal)
-        self.dock_faltantes.hide()
         self.dock_firmas.hide()
 
-        # Barra de estado
+        # Barra de estado discreta
+        self.boton_faltantes = QToolButton(self)
+        self.boton_faltantes.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.boton_faltantes.setAutoRaise(True)
+        self.boton_faltantes.clicked.connect(self.mostrar_faltantes)
+        self.boton_faltantes.hide()
+        iconos.asignar(self.boton_faltantes, "triangle-alert")
         self.etiqueta_pagina = QLabel("", self)
         self.etiqueta_zoom = QLabel("", self)
+        self.statusBar().addPermanentWidget(self.boton_faltantes)
         self.statusBar().addPermanentWidget(self.etiqueta_pagina)
         self.statusBar().addPermanentWidget(self.etiqueta_zoom)
+        self.statusBar().setSizeGripEnabled(False)
 
         self._crear_acciones()
-        self._crear_menus()
+        self._crear_encabezado()
+        self.lateral.agregar("paginas", "Páginas", "files", self.miniaturas)
+        self.lateral.agregar("fuentes", "Fuentes del documento", "type", self.panel_fuentes)
+        self.lateral.agregar("faltantes", "Faltantes", "package-search", self.faltantes)
         self._conectar()
+        gestor().cambio.connect(self._tema_cambio)
         self._actualizar_estado()
-
         if chequear_al_iniciar:
             QTimer.singleShot(0, self.chequear_dependencias)
 
     # ------------------------------------------------------------------ acciones
-    def _accion(self, texto: str, atajo=None, slot=None, checkable=False, tip: str = "") -> QAction:
+    def _accion(self, texto: str, icono: str | None, atajo=None, slot=None, checkable: bool = False,
+                tip: str = "", grupo: str = "") -> QAction:
         a = QAction(texto, self)
-        if atajo is not None:
-            if isinstance(atajo, (list, tuple)):
-                a.setShortcuts([QKeySequence(x) for x in atajo])
-            else:
-                a.setShortcut(QKeySequence(atajo))
+        atajos = [] if atajo is None else ([atajo] if not isinstance(atajo, (list, tuple)) else list(atajo))
+        if atajos:
+            a.setShortcuts([QKeySequence(x) for x in atajos])
         if slot is not None:
             a.triggered.connect(slot)
         a.setCheckable(checkable)
         if tip:
             a.setStatusTip(tip)
+        if icono:
+            iconos.asignar(a, icono)
+        self._tooltip(a)
         self.addAction(a)
+        self._acciones.append((a, grupo))
         return a
+
+    @staticmethod
+    def _tooltip(a: QAction, texto: str | None = None) -> None:
+        """Tooltip = nombre + atajo de teclado (y la descripción, si hay)."""
+        nombre = (texto or a.text()).replace("&", "")
+        atajo = a.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        tip = f"{nombre} ({atajo})" if atajo else nombre
+        if a.statusTip():
+            tip += f"\n{a.statusTip()}"
+        a.setToolTip(tip)
 
     def _crear_acciones(self) -> None:
         S = QKeySequence.StandardKey
-        self.acc_abrir = self._accion("&Abrir…", S.Open, self.accion_abrir)
-        self.acc_guardar = self._accion("&Guardar copia", S.Save, self.guardar_copia,
+        A, E, V, F, P, H = "Archivo", "Editar", "Ver", "Firmar", "Páginas", "Herramientas"
+        self.acc_abrir = self._accion("Abrir…", "folder-open", S.Open, self.accion_abrir, grupo=A)
+        self.acc_guardar = self._accion("Guardar copia", "save", S.Save, self.guardar_copia, grupo=A,
                                         tip="Guarda una copia editada; el original no se toca.")
-        self.acc_guardar_como = self._accion("Guardar copia &como…", "Ctrl+Shift+S", self.guardar_como)
-        self.acc_sobrescribir = self._accion("&Sobrescribir original…", None, self.sobrescribir_original,
+        self.acc_guardar_como = self._accion("Guardar copia como…", "save-all", "Ctrl+Shift+S", self.guardar_como,
+                                             grupo=A)
+        self.acc_sobrescribir = self._accion("Sobrescribir original…", "file-exclamation-point", None,
+                                             self.sobrescribir_original, grupo=A,
                                              tip="Reemplaza el archivo original (pide confirmación).")
-        self.acc_cerrar = self._accion("&Cerrar documento", S.Close, self.cerrar_documento)
-        self.acc_salir = self._accion("Sa&lir", "Ctrl+Q", self.close)
+        self.acc_cerrar = self._accion("Cerrar documento", "file-x", S.Close, self.cerrar_documento, grupo=A)
+        self.acc_salir = self._accion("Salir", "log-out", "Ctrl+Q", self.close, grupo=A)
 
-        self.acc_deshacer = self._accion("&Deshacer", S.Undo, self.deshacer)
-        self.acc_rehacer = self._accion("&Rehacer", ["Ctrl+Y", "Ctrl+Shift+Z"], self.rehacer)
-        self.acc_rotar_der = self._accion("Rotar página a la de&recha", "Ctrl+R", lambda: self.rotar(90))
-        self.acc_rotar_izq = self._accion("Rotar página a la i&zquierda", "Ctrl+Shift+R", lambda: self.rotar(-90))
+        self.acc_deshacer = self._accion("Deshacer", "undo-2", S.Undo, self.deshacer, grupo=E)
+        self.acc_rehacer = self._accion("Rehacer", "redo-2", ["Ctrl+Y", "Ctrl+Shift+Z"], self.rehacer, grupo=E)
+        self.acc_rotar_der = self._accion("Rotar a la derecha", "rotate-cw", "Ctrl+R", lambda: self.rotar(90),
+                                          grupo=P)
+        self.acc_rotar_izq = self._accion("Rotar a la izquierda", "rotate-ccw", "Ctrl+Shift+R",
+                                          lambda: self.rotar(-90), grupo=P)
 
         self.grupo_modo = QActionGroup(self)
-        self.acc_modo_mano = self._accion("Mano (desplazar)", "H", lambda: self.set_modo(Modo.MANO), True)
-        self.acc_modo_resaltar = self._accion("Resaltar texto", "Ctrl+Shift+H",
+        self.acc_modo_mano = self._accion("Mano", "hand", "H", lambda: self.set_modo(Modo.MANO), True,
+                                          "Desplazar la página arrastrando.", E)
+        self.acc_modo_texto = self._accion("Editar texto", "type", "Ctrl+Shift+E", lambda: self.set_modo(Modo.TEXTO),
+                                           True, "Clic para seleccionar; doble clic o F2 para editar; "
+                                                 "arrastrá el marco para mover.", E)
+        self.acc_editar_seleccion = self._accion("Editar selección…", "pencil-line", "F2", self.editar_seleccion,
+                                                 grupo=E)
+        self.acc_modo_resaltar = self._accion("Resaltar", "highlighter", "Ctrl+Shift+H",
                                               lambda: self.set_modo(Modo.RESALTAR), True,
-                                              "Arrastrá sobre el texto para resaltarlo.")
-        self.acc_modo_nota = self._accion("Agregar nota", "Ctrl+Shift+N", lambda: self.set_modo(Modo.NOTA), True,
-                                          "Hacé clic donde quieras dejar una nota.")
-        self.acc_insertar_imagen = self._accion("Insertar imagen desde archivo…", "Ctrl+Shift+I",
-                                                self.accion_insertar_imagen)
-        self.acc_firmas = self._accion("Firmas…", "Ctrl+Shift+F", self.mostrar_firmas,
-                                       tip="Biblioteca de firmas: agregar, quitar fondo e insertar.")
-        self.acc_modo_texto = self._accion("Editar texto", "Ctrl+Shift+E", lambda: self.set_modo(Modo.TEXTO), True,
-                                           "Clic en un texto para seleccionarlo; doble clic o F2 para editarlo; "
-                                           "arrastrá el marco para moverlo.")
-        self.acc_editar_seleccion = self._accion("Editar texto seleccionado…", "F2", self.editar_seleccion)
+                                              "Arrastrá sobre el texto para resaltarlo.", E)
+        self.acc_modo_nota = self._accion("Nota", "sticky-note", "Ctrl+Shift+N", lambda: self.set_modo(Modo.NOTA),
+                                          True, "Hacé clic donde quieras dejar una nota.", E)
         for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, self.acc_modo_texto):
             self.grupo_modo.addAction(a)
         self.acc_modo_mano.setChecked(True)
+        self.acc_firmas = self._accion("Firmas", "signature", "Ctrl+Shift+F", self.mostrar_firmas, grupo=F,
+                                       tip="Biblioteca de firmas: agregar, quitar fondo e insertar.")
+        self.acc_insertar_imagen = self._accion("Insertar imagen…", "image-plus", "Ctrl+Shift+I",
+                                                self.accion_insertar_imagen, grupo=F)
 
-        self.acc_buscar = self._accion("&Buscar…", S.Find, self.abrir_busqueda)
-        self.acc_acercar = self._accion("Acercar", [S.ZoomIn, "Ctrl+="], self.visor.acercar)
-        self.acc_alejar = self._accion("Alejar", S.ZoomOut, self.visor.alejar)
-        self.acc_zoom_real = self._accion("Tamaño real (100%)", "Ctrl+0", self.visor.zoom_real)
-        self.acc_ajustar_ancho = self._accion("Ajustar al ancho", "Ctrl+1", self.visor.ajustar_ancho)
-        self.acc_ajustar_pagina = self._accion("Ajustar página", "Ctrl+2", self.visor.ajustar_pagina)
-        self.acc_pag_ant = self._accion("Página anterior", "PgUp",
-                                        lambda: self.visor.ir_a_pagina(self.visor.pagina_actual - 1))
-        self.acc_pag_sig = self._accion("Página siguiente", "PgDown",
-                                        lambda: self.visor.ir_a_pagina(self.visor.pagina_actual + 1))
-        self.acc_chequear = self._accion("Verificar dependencias", None, self.chequear_dependencias)
-        self.acc_sustituir = self._accion("Reemplazar fuente en todo el documento…", None,
-                                          lambda: self.sustituir_fuentes(),
-                                          tip="Modo armónico: reemplaza una fuente en todo el documento.")
-        self.acc_ver_faltantes = self.dock_faltantes.toggleViewAction()
-        self.acc_ver_faltantes.setText("Panel de faltantes")
-        self.acc_ver_miniaturas = self.dock_miniaturas.toggleViewAction()
-        self.acc_ver_miniaturas.setText("Panel de páginas")
-        self.acc_acerca = self._accion("Acerca de PDF Studio", None, self.acerca_de)
+        self.acc_buscar = self._accion("Buscar", "search", S.Find, self.abrir_busqueda, grupo=V)
+        self.acc_acercar = self._accion("Acercar", "zoom-in", [S.ZoomIn, "Ctrl+="], self.visor.acercar, grupo=V)
+        self.acc_alejar = self._accion("Alejar", "zoom-out", S.ZoomOut, self.visor.alejar, grupo=V)
+        self.acc_zoom_real = self._accion("Tamaño real", "ratio", "Ctrl+0", self.visor.zoom_real, grupo=V)
+        self.acc_ajustar_ancho = self._accion("Ajustar al ancho", "move-horizontal", "Ctrl+1",
+                                              self.visor.ajustar_ancho, grupo=V)
+        self.acc_ajustar_pagina = self._accion("Ajustar página", "maximize-2", "Ctrl+2", self.visor.ajustar_pagina,
+                                               grupo=V)
+        self.acc_pag_ant = self._accion("Página anterior", "chevron-up", "PgUp",
+                                        lambda: self.visor.ir_a_pagina(self.visor.pagina_actual - 1), grupo=V)
+        self.acc_pag_sig = self._accion("Página siguiente", "chevron-down", "PgDown",
+                                        lambda: self.visor.ir_a_pagina(self.visor.pagina_actual + 1), grupo=V)
+        self.acc_lateral = self._accion("Barra lateral", "panel-left", "Ctrl+B", self.alternar_lateral, True,
+                                        grupo=V)
+        self.acc_lateral.setChecked(True)
+        self.acc_ver_paginas = self._accion("Ver páginas", "files", "Ctrl+Alt+1",
+                                            lambda: self.mostrar_lateral("paginas"), grupo=V)
+        self.acc_ver_fuentes = self._accion("Ver fuentes del documento", "type", "Ctrl+Alt+2",
+                                            lambda: self.mostrar_lateral("fuentes"), grupo=V)
+        self.acc_ver_faltantes = self._accion("Ver faltantes", "package-search", "Ctrl+Alt+3",
+                                              self.mostrar_faltantes, grupo=V)
 
-    def _crear_menus(self) -> None:
-        m = self.menuBar().addMenu("&Archivo")
-        for a in (self.acc_abrir, None, self.acc_guardar, self.acc_guardar_como, self.acc_sobrescribir,
-                  None, self.acc_cerrar, self.acc_salir):
-            m.addSeparator() if a is None else m.addAction(a)
-        m = self.menuBar().addMenu("&Editar")
-        for a in (self.acc_deshacer, self.acc_rehacer, None, self.acc_rotar_der, self.acc_rotar_izq,
-                  None, self.acc_modo_mano, self.acc_modo_texto, self.acc_editar_seleccion,
-                  self.acc_modo_resaltar, self.acc_modo_nota, None,
-                  self.acc_firmas, self.acc_insertar_imagen):
-            m.addSeparator() if a is None else m.addAction(a)
-        m = self.menuBar().addMenu("&Ver")
-        for a in (self.acc_acercar, self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho,
-                  self.acc_ajustar_pagina, None, self.acc_pag_ant, self.acc_pag_sig, None,
-                  self.acc_ver_miniaturas, self.acc_ver_faltantes):
-            m.addSeparator() if a is None else m.addAction(a)
-        m = self.menuBar().addMenu("&Herramientas")
-        m.addAction(self.acc_buscar)
-        m.addAction(self.acc_sustituir)
-        m.addAction(self.acc_chequear)
-        m = self.menuBar().addMenu("A&yuda")
-        m.addAction(self.acc_acerca)
+        self.grupo_tema = QActionGroup(self)
+        self.acc_tema_sistema = self._accion("Tema según Windows", "monitor", None,
+                                             lambda: gestor().set_tema("sistema"), True, grupo=V)
+        self.acc_tema_claro = self._accion("Tema claro", "sun", None, lambda: gestor().set_tema("claro"), True,
+                                           grupo=V)
+        self.acc_tema_oscuro = self._accion("Tema oscuro", "moon", None, lambda: gestor().set_tema("oscuro"), True,
+                                            grupo=V)
+        for a in (self.acc_tema_sistema, self.acc_tema_claro, self.acc_tema_oscuro):
+            self.grupo_tema.addAction(a)
+        self.acc_tema = self._accion("Tema", "sun-moon", None, None, grupo=V, tip="Claro, oscuro o según Windows.")
+        self.acc_agrandar = self._accion("Agrandar la interfaz", "a-large-small", "Ctrl+Alt+=", gestor().agrandar,
+                                         grupo=V)
+        self.acc_achicar = self._accion("Achicar la interfaz", "a-large-small", "Ctrl+Alt+-", gestor().achicar,
+                                        grupo=V)
+        self.acc_escala_normal = self._accion("Tamaño normal de la interfaz", "a-large-small", "Ctrl+Alt+0",
+                                              lambda: gestor().set_escala(1.0), grupo=V)
 
-        barra = self.addToolBar("Principal")
-        barra.setObjectName("barra_principal")
-        for a in (self.acc_abrir, self.acc_guardar, None, self.acc_deshacer, self.acc_rehacer, None,
-                  self.acc_alejar, self.acc_acercar, self.acc_ajustar_ancho, None,
-                  self.acc_rotar_izq, self.acc_rotar_der, None,
-                  self.acc_modo_mano, self.acc_modo_texto, None, self.acc_modo_resaltar, self.acc_modo_nota,
-                  None, self.acc_firmas, None, self.acc_buscar):
-            barra.addSeparator() if a is None else barra.addAction(a)
+        self.acc_sustituir = self._accion("Reemplazar fuente…", "replace", None, lambda: self.sustituir_fuentes(),
+                                          grupo=H, tip="Modo armónico: reemplaza una fuente en todo el documento.")
+        self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.chequear_dependencias,
+                                         grupo=H)
+        self.acc_paleta = self._accion("Paleta de comandos", "command", "Ctrl+K", self.abrir_paleta, grupo=H,
+                                       tip="Buscá cualquier acción por su nombre.")
+        self.acc_acerca = self._accion("Acerca de PDF Studio", "info", None, self.acerca_de, grupo=H)
+        self.acc_mas = self._accion("Más opciones", "ellipsis", None, None, grupo="")
+
+        # Navegación con teclado (no aparecen en la paleta)
+        for i in range(len(PESTANAS)):
+            a = QAction(self)
+            a.setShortcut(QKeySequence(f"Alt+{i + 1}"))
+            a.triggered.connect(lambda _=False, n=i: self.ir_a_pestana(n))
+            self.addAction(a)
+        foco = QAction(self)
+        foco.setShortcut(QKeySequence("F6"))
+        foco.triggered.connect(self.siguiente_region)
+        self.addAction(foco)
+
+    def _crear_encabezado(self) -> None:
+        enc = self.encabezado = Encabezado(self)
+        # Acceso rápido: archivo + deshacer/rehacer
+        for a in (self.acc_abrir, self.acc_guardar):
+            enc.rapida.addAction(a)
+        menu_mas = QMenu(self)
+        for a in (self.acc_guardar_como, self.acc_sobrescribir, self.acc_cerrar):
+            menu_mas.addAction(a)
+        menu_mas.addSeparator()
+        menu_mas.addAction(self.acc_acerca)
+        menu_mas.addAction(self.acc_salir)
+        enc.agregar_menu(enc.rapida, self.acc_mas, menu_mas)
+        enc.rapida.addSeparator()
+        enc.rapida.addAction(self.acc_deshacer)
+        enc.rapida.addAction(self.acc_rehacer)
+        # Derecha: paleta y tema
+        enc.derecha.addAction(self.acc_paleta)
+        menu_tema = QMenu(self)
+        for a in (self.acc_tema_sistema, self.acc_tema_claro, self.acc_tema_oscuro):
+            menu_tema.addAction(a)
+        menu_tema.addSeparator()
+        for a in (self.acc_agrandar, self.acc_achicar, self.acc_escala_normal):
+            menu_tema.addAction(a)
+        enc.agregar_menu(enc.derecha, self.acc_tema, menu_tema)
+
+        ver = enc.agregar_pestana("Ver")
+        for a in (self.acc_alejar, self.acc_acercar, self.acc_zoom_real, self.acc_ajustar_ancho,
+                  self.acc_ajustar_pagina, None, self.acc_pag_ant, self.acc_pag_sig, None, self.acc_buscar,
+                  None, self.acc_lateral):
+            ver.addSeparator() if a is None else ver.addAction(a)
+        editar = enc.agregar_pestana("Editar")
+        for a in (self.acc_modo_mano, self.acc_modo_texto):
+            editar.addAction(a)
         self.combo_nivel = QComboBox(self)
         self.combo_nivel.addItem("Fragmento", Nivel.FRAGMENTO)
         self.combo_nivel.addItem("Línea", Nivel.LINEA)
         self.combo_nivel.addItem("Párrafo", Nivel.PARRAFO)
         self.combo_nivel.setCurrentIndex(1)
         self.combo_nivel.setToolTip("Qué se selecciona al hacer clic en un texto")
-        barra.insertWidget(self.acc_modo_resaltar, self.combo_nivel)
+        self.combo_nivel.setAccessibleName("Nivel de selección de texto")
+        editar.addWidget(self.combo_nivel)
+        for a in (self.acc_editar_seleccion, None, self.acc_modo_resaltar, self.acc_modo_nota, None,
+                  self.acc_sustituir):
+            editar.addSeparator() if a is None else editar.addAction(a)
+        firmar = enc.agregar_pestana("Firmar")
+        for a in (self.acc_firmas, self.acc_insertar_imagen):
+            firmar.addAction(a)
+        paginas = enc.agregar_pestana("Páginas")
+        for a in (self.acc_rotar_izq, self.acc_rotar_der):
+            paginas.addAction(a)
+        herramientas = enc.agregar_pestana("Herramientas")
+        for a in (self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
+            herramientas.addSeparator() if a is None else herramientas.addAction(a)
+        enc.finalizar()
+        enc.pestanas.setCurrentIndex(1)       # arranca en "Editar"
+        self.setMenuWidget(enc)
+        self._marcar_tema()
 
     def _conectar(self) -> None:
         self.visor.pagina_actual_cambio.connect(self._pagina_cambio)
-        self.visor.zoom_cambio.connect(lambda z: self.etiqueta_zoom.setText(f"Zoom {z * 100:.0f}%"))
+        self.visor.zoom_cambio.connect(lambda z: self.etiqueta_zoom.setText(f"{z * 100:.0f}%"))
         self.visor.rect_seleccionado.connect(self._resaltar_en)
         self.visor.punto_clic.connect(self._nota_en)
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
         self.faltantes.rechequear.connect(self.chequear_dependencias)
-        self.faltantes.reemplazar_fuente.connect(lambda nombre: self.sustituir_fuentes(nombre or None))
+        self.faltantes.instalar.connect(self.instalar_faltante)
+        self.panel_fuentes.reemplazar_fuente.connect(lambda nombre: self.sustituir_fuentes(nombre or None))
         self.visor.texto_clic.connect(self._texto_clic)
         self.visor.texto_doble_clic.connect(self._texto_doble_clic)
         self.visor.seleccion_movida.connect(self.mover_seleccion)
@@ -224,6 +325,50 @@ class VentanaPrincipal(QMainWindow):
         self.panel_firmas.eliminar.connect(self.eliminar_firma)
         self.panel_firmas.aplicar_colocacion.connect(self.aplicar_colocacion)
         self.panel_firmas.cancelar_colocacion.connect(self.cancelar_colocacion)
+        self.dock_lateral.visibilityChanged.connect(self.acc_lateral.setChecked)
+
+    # ------------------------------------------------------------------ tema, navegación y paleta
+    def _tema_cambio(self) -> None:
+        iconos.refrescar()
+        self.visor.aplicar_tema()
+        self._marcar_tema()
+
+    def _marcar_tema(self) -> None:
+        {"sistema": self.acc_tema_sistema, "claro": self.acc_tema_claro,
+         "oscuro": self.acc_tema_oscuro}[gestor().preferencia].setChecked(True)
+
+    def ir_a_pestana(self, indice: int) -> None:
+        self.encabezado.pestanas.setCurrentIndex(indice)
+        self.encabezado.pestanas.setFocus()
+
+    def siguiente_region(self) -> None:
+        """F6: pasa el foco entre la cinta, el visor y la barra lateral."""
+        regiones = [self.encabezado.pestanas, self.visor]
+        if self.dock_lateral.isVisible():
+            regiones.append(self.lateral.pila.currentWidget())
+        actual = QApplication.focusWidget()
+        indice = next((i for i, w in enumerate(regiones) if w is actual or (actual and w.isAncestorOf(actual))), -1)
+        regiones[(indice + 1) % len(regiones)].setFocus(Qt.FocusReason.TabFocusReason)
+
+    def acciones_de_paleta(self) -> list[tuple[QAction, str]]:
+        return [(a, g) for a, g in self._acciones if g and a is not self.acc_tema]
+
+    def abrir_paleta(self) -> None:
+        paleta = PaletaComandos(self.acciones_de_paleta(), self)
+        geo = self.geometry()
+        paleta.move(geo.x() + (geo.width() - paleta.width()) // 2, geo.y() + 80)
+        paleta.campo.setFocus()
+        paleta.exec()
+
+    def alternar_lateral(self) -> None:
+        self.dock_lateral.setVisible(not self.dock_lateral.isVisible())
+
+    def mostrar_lateral(self, clave: str) -> None:
+        self.dock_lateral.show()
+        self.lateral.mostrar(clave)
+
+    def mostrar_faltantes(self) -> None:
+        self.mostrar_lateral("faltantes")
 
     # ------------------------------------------------------------------ diálogos (reemplazables en tests)
     def _pedir_ruta_abrir(self) -> str | None:
@@ -255,7 +400,8 @@ class VentanaPrincipal(QMainWindow):
 
     def _dialogo_editar_texto(self, bloque: BloqueTexto) -> tuple[str, OpcionFuente] | None:
         dialogo = DialogoEditarTexto(bloque, lambda texto: self._analizar(bloque, texto),
-                                     lambda: indice_sistema().cargar(), self)
+                                     lambda: indice_sistema().cargar(), self,
+                                     instalar=lambda fuente: self.instalar(instalacion_fuente(fuente)))
         if dialogo.exec() and dialogo.opcion_elegida() is not None:
             return dialogo.texto, dialogo.opcion_elegida()
         return None
@@ -270,6 +416,12 @@ class VentanaPrincipal(QMainWindow):
         if dialogo.exec() and dialogo.plan is not None and dialogo.plan.operacion is not None:
             return dialogo.plan
         return None
+
+    def _confirmar_instalacion(self, inst: Instalacion) -> bool:
+        return bool(DialogoConfirmarInstalacion(inst, self).exec())
+
+    def _ejecutar_instalacion(self, inst: Instalacion) -> tuple[bool, str]:
+        return ejecutar_con_progreso(inst, self)
 
     def _confirmar_avisos(self, avisos: list[str]) -> bool:
         return self._preguntar("Editar texto", "Antes de aplicar:\n\n• " + "\n• ".join(avisos)
@@ -301,6 +453,21 @@ class VentanaPrincipal(QMainWindow):
 
     def _mostrar_guardado(self, guardado: Guardado, destino: Path) -> None:
         mostrar_guardado(self, guardado, destino)
+
+    # ------------------------------------------------------------------ instalación asistida
+    def instalar(self, inst: Instalacion) -> bool:
+        """Instala con confirmación explícita. Devuelve True si quedó instalado."""
+        if not self._confirmar_instalacion(inst):
+            return False
+        ok, mensaje = self._ejecutar_instalacion(inst)
+        self._informar("Instalación", mensaje, error=not ok)
+        if ok:
+            self.chequear_dependencias(mostrar=False)
+        return ok
+
+    def instalar_faltante(self, faltante: Faltante) -> None:
+        if faltante.instalacion is not None:
+            self.instalar(faltante.instalacion)
 
     # ------------------------------------------------------------------ abrir / cerrar
     def accion_abrir(self) -> None:
@@ -356,11 +523,21 @@ class VentanaPrincipal(QMainWindow):
         self.miniaturas.set_documento(None)
         self.busqueda.set_documento(None)
         self.busqueda.hide()
-        self.faltantes.set_documento(None, [])
+        self.panel_fuentes.set_fuentes(None)
+        self.faltantes.set_documento([])
+        self._actualizar_insignia()
         self.panel_firmas.set_colocando(False)
         doc.cerrar()
         self._actualizar_estado()
         return True
+
+    def showEvent(self, evento) -> None:
+        super().showEvent(evento)
+        if not getattr(self, "_docks_dimensionados", False):
+            # resizeDocks solo tiene efecto con la ventana ya visible
+            self._docks_dimensionados = True
+            ancho = round(360 * gestor().escala)
+            QTimer.singleShot(0, lambda: self.resizeDocks([self.dock_lateral], [ancho], Qt.Orientation.Horizontal))
 
     def closeEvent(self, evento: QCloseEvent) -> None:
         if self.cerrar_documento():
@@ -399,7 +576,7 @@ class VentanaPrincipal(QMainWindow):
         if destino.resolve() == self.documento.ruta_original:
             self._informar("Guardar copia", "Elegiste el archivo original. Para no perderlo, PDF Studio "
                                             "guarda siempre una copia nueva.\nSi realmente querés "
-                                            "reemplazarlo, usá Archivo → Sobrescribir original.")
+                                            "reemplazarlo, usá Más opciones → Sobrescribir original.")
             return False
         return self._guardar_en(destino)
 
@@ -687,17 +864,17 @@ class VentanaPrincipal(QMainWindow):
         self._actualizar_estado()
 
     # ------------------------------------------------------------------ dependencias
-    def chequear_dependencias(self) -> None:
+    def chequear_dependencias(self, mostrar: bool = True) -> None:
         faltan = chequear_inicio()
         self.faltantes.set_generales(faltan)
         if self.documento is not None:
-            self._chequear_fuentes_documento()
-        if self.faltantes.faltantes:
-            self.dock_faltantes.show()
-            self.statusBar().showMessage(f"Faltan {len(self.faltantes.faltantes)} elemento(s): "
-                                         "mirá el panel Faltantes.", 8000)
+            self._chequear_fuentes_documento(mostrar=False)
+        self._actualizar_insignia()
+        # El panel se abre solo si falta algo importante; lo opcional queda en el indicador de abajo
+        if mostrar and any(f.importancia != Importancia.OPCIONAL for f in self.faltantes.faltantes):
+            self.mostrar_faltantes()
 
-    def _chequear_fuentes_documento(self) -> None:
+    def _chequear_fuentes_documento(self, mostrar: bool = True) -> None:
         if self.documento is None:
             return
         indice = indice_sistema()
@@ -709,9 +886,18 @@ class VentanaPrincipal(QMainWindow):
             fuentes, faltan = chequear_fuentes(self.documento.doc, indice, indice_incluidas())
         finally:
             QApplication.restoreOverrideCursor()
-        self.faltantes.set_documento(fuentes, faltan)
-        if faltan:
-            self.dock_faltantes.show()
+        self.panel_fuentes.set_fuentes(fuentes)
+        self.faltantes.set_documento(faltan)
+        self._actualizar_insignia()
+        if mostrar and any(f.importancia != Importancia.OPCIONAL for f in faltan):
+            self.mostrar_faltantes()
+
+    def _actualizar_insignia(self) -> None:
+        n = len(self.faltantes.faltantes)
+        self.lateral.set_insignia("faltantes", n)
+        self.boton_faltantes.setText(f"{n} faltante{'s' if n != 1 else ''}")
+        self.boton_faltantes.setToolTip("Ver qué falta instalar (Ctrl+Alt+3)")
+        self.boton_faltantes.setVisible(n > 0)
 
     # ------------------------------------------------------------------ estado
     def _actualizar_estado(self) -> None:
@@ -722,12 +908,15 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
                   self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir):
             a.setEnabled(hay)
-        self.acc_deshacer.setEnabled(hay and self.documento.puede_deshacer)
-        self.acc_rehacer.setEnabled(hay and self.documento.puede_rehacer)
-        self.acc_deshacer.setText(f"&Deshacer: {self.documento.texto_deshacer}"
-                                  if hay and self.documento.puede_deshacer else "&Deshacer")
-        self.acc_rehacer.setText(f"&Rehacer: {self.documento.texto_rehacer}"
-                                 if hay and self.documento.puede_rehacer else "&Rehacer")
+        puede_deshacer = hay and self.documento.puede_deshacer
+        puede_rehacer = hay and self.documento.puede_rehacer
+        self.acc_deshacer.setEnabled(puede_deshacer)
+        self.acc_rehacer.setEnabled(puede_rehacer)
+        # El texto de la acción dice qué se deshace; el tooltip lo muestra con el atajo
+        self.acc_deshacer.setText(f"Deshacer: {self.documento.texto_deshacer}" if puede_deshacer else "Deshacer")
+        self.acc_rehacer.setText(f"Rehacer: {self.documento.texto_rehacer}" if puede_rehacer else "Rehacer")
+        self._tooltip(self.acc_deshacer)
+        self._tooltip(self.acc_rehacer)
         if hay:
             marca = "*" if self.documento.modificado else ""
             self.setWindowTitle(f"{self.documento.ruta_original.name}{marca} — {NOMBRE_APP}")
@@ -738,6 +927,4 @@ class VentanaPrincipal(QMainWindow):
             self.etiqueta_zoom.setText("")
 
     def acerca_de(self) -> None:
-        self._informar("Acerca de PDF Studio",
-                       f"{NOMBRE_APP} {__version__}\nEditor de PDF gratuito y de código abierto (AGPL-3.0).\n\n"
-                       "El archivo original nunca se modifica: siempre se guarda una copia.")
+        DialogoAcerca(self).exec()

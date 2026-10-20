@@ -1,7 +1,8 @@
-"""Detector de dependencias: qué falta, para qué sirve y el comando para instalarlo.
+"""Detector de dependencias: qué falta, para qué sirve y cómo instalarlo.
 
 Se ejecuta al iniciar la app (paquetes y programas) y al abrir cada PDF (fuentes).
-Nunca instala nada por su cuenta: solo arma comandos de PowerShell listos para copiar.
+Cada faltante trae el comando de PowerShell listo para copiar y, cuando se puede,
+una instalación asistida que la app ejecuta SOLO tras la confirmación del usuario.
 """
 from __future__ import annotations
 
@@ -19,7 +20,9 @@ import pymupdf
 
 from pdf_studio import config
 from pdf_studio.core.fuentes import Embebido, IndiceFuentesSistema, InfoFuente, analizar_fuentes
+from pdf_studio.dependencias import instalador
 from pdf_studio.dependencias.catalogo_fuentes import buscar_comercial, buscar_libre
+from pdf_studio.dependencias.instalador import Instalacion
 
 # IDs verificados con `winget search` / GitHub (octubre 2026)
 WINGET_TESSERACT = "tesseract-ocr.tesseract"
@@ -46,6 +49,7 @@ class Faltante:
     importancia: Importancia
     comando: str | None = None   # PowerShell listo para copiar; None si no hay instalación posible
     detalle: str = ""
+    instalacion: Instalacion | None = None   # instalación asistida (con confirmación)
 
 
 # ---------------------------------------------------------------------- Python
@@ -55,17 +59,20 @@ class PaquetePython:
     paquete: str
     para_que: str
     importancia: Importancia
+    licencia: str = ""
 
 
 PAQUETES = [
-    PaquetePython("PySide6", "PySide6", "la interfaz gráfica", Importancia.NECESARIO),
-    PaquetePython("pymupdf", "pymupdf", "abrir, mostrar y editar PDFs", Importancia.NECESARIO),
-    PaquetePython("numpy", "numpy", "la verificación de fidelidad visual", Importancia.NECESARIO),
-    PaquetePython("fontTools", "fonttools", "analizar e instalar fuentes", Importancia.NECESARIO),
-    PaquetePython("pikepdf", "pikepdf", "verificar la estructura de los PDFs guardados", Importancia.RECOMENDADO),
-    PaquetePython("PIL", "Pillow", "las firmas en imagen (quitar fondo)", Importancia.NECESARIO),
-    PaquetePython("ocrmypdf", "ocrmypdf", "el OCR (reconocer texto en PDFs escaneados)", Importancia.OPCIONAL),
-    PaquetePython("pyhanko", "pyHanko", "la firma digital con certificado", Importancia.OPCIONAL),
+    PaquetePython("PySide6", "PySide6", "la interfaz gráfica", Importancia.NECESARIO, "LGPL-3.0"),
+    PaquetePython("pymupdf", "pymupdf", "abrir, mostrar y editar PDFs", Importancia.NECESARIO, "AGPL-3.0"),
+    PaquetePython("numpy", "numpy", "la verificación de fidelidad visual", Importancia.NECESARIO, "BSD"),
+    PaquetePython("fontTools", "fonttools", "analizar e instalar fuentes", Importancia.NECESARIO, "MIT"),
+    PaquetePython("pikepdf", "pikepdf", "verificar la estructura de los PDFs guardados", Importancia.RECOMENDADO,
+                  "MPL-2.0"),
+    PaquetePython("PIL", "Pillow", "las firmas en imagen (quitar fondo)", Importancia.NECESARIO, "MIT-CMU"),
+    PaquetePython("ocrmypdf", "ocrmypdf", "el OCR (reconocer texto en PDFs escaneados)", Importancia.OPCIONAL,
+                  "MPL-2.0"),
+    PaquetePython("pyhanko", "pyHanko", "la firma digital con certificado", Importancia.OPCIONAL, "MIT"),
 ]
 
 
@@ -93,6 +100,7 @@ def chequear_python(paquetes: list[PaquetePython] = PAQUETES) -> list[Faltante]:
                 para_que=f"Se usa para {p.para_que}.",
                 importancia=p.importancia,
                 comando=comando_pip(p.paquete),
+                instalacion=instalador.instalacion_pip(p.paquete, p.licencia, comando_pip(p.paquete)),
             ))
     return faltan
 
@@ -157,23 +165,24 @@ def comando_tesseract() -> str:
 
 def chequear_tesseract() -> list[Faltante]:
     exe = buscar_tesseract()
+    idiomas_inst = instalador.instalacion_idiomas(URL_TESSDATA, ("spa", "eng", "osd"), comando_idiomas_ocr())
     if exe is None:
         return [
             Faltante("programa:tesseract", "Tesseract OCR",
                      "Motor de OCR: reconoce el texto de PDFs escaneados.",
                      Importancia.OPCIONAL, comando_tesseract(),
-                     "Después de instalarlo, descargá también los idiomas (ítem siguiente) "
-                     "y reiniciá PDF Studio."),
+                     "Después de instalarlo, instalá también los idiomas (ítem siguiente).",
+                     instalador.instalacion_tesseract(WINGET_TESSERACT, comando_tesseract())),
             Faltante("idioma:ocr", "Idiomas español e inglés para OCR",
                      "Tesseract necesita estos archivos para reconocer texto en español.",
-                     Importancia.OPCIONAL, comando_idiomas_ocr()),
+                     Importancia.OPCIONAL, comando_idiomas_ocr(), instalacion=idiomas_inst),
         ]
     idiomas = idiomas_tesseract(exe, tessdata_a_usar(exe))
     faltan = [i for i in IDIOMAS_OCR if i not in idiomas]
     if faltan:
         return [Faltante("idioma:ocr", "Idiomas para OCR: " + ", ".join(faltan),
                          "Tesseract está instalado pero le faltan idiomas para reconocer texto.",
-                         Importancia.OPCIONAL, comando_idiomas_ocr())]
+                         Importancia.OPCIONAL, comando_idiomas_ocr(), instalacion=idiomas_inst)]
     return []
 
 
@@ -210,7 +219,8 @@ def chequear_ghostscript() -> list[Faltante]:
         return []
     return [Faltante("programa:ghostscript", "Ghostscript",
                      "Permite la compresión agresiva de PDFs (opcional; sin él se usa la compresión normal).",
-                     Importancia.OPCIONAL, comando_ghostscript())]
+                     Importancia.OPCIONAL, comando_ghostscript(),
+                     instalacion=instalador.instalacion_ghostscript(API_GHOSTSCRIPT, comando_ghostscript()))]
 
 
 # ---------------------------------------------------------------------- fuentes
@@ -230,7 +240,8 @@ def faltante_de_fuente(f: InfoFuente) -> Faltante | None:
     if libre is not None:
         return Faltante(f"fuente:{f.familia}", f"Fuente «{f.nombre}»",
                         problema, importancia, libre.comando,
-                        f"Es una fuente libre ({libre.licencia}): se puede instalar gratis.")
+                        f"Es una fuente libre ({libre.licencia}): se puede instalar gratis.",
+                        instalador.instalacion_fuente(libre))
     comercial = buscar_comercial(f.nombre)
     if comercial is not None:
         compat = "con el mismo ancho por letra" if comercial.metrica_compatible else "parecida"

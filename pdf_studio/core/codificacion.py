@@ -21,7 +21,7 @@ import pymupdf
 from fontTools import agl
 from fontTools.encodings.StandardEncoding import StandardEncoding
 
-from pdf_studio.core.fuentes import ESTANDAR_14, Embebido, clasificar_embebido, clave_fuente, _normalizar
+from pdf_studio.core.fuentes import ESTANDAR_14, Embebido, clasificar_fuente, clave_fuente, _normalizar
 
 _HEX = re.compile(rb"<([0-9A-Fa-f]*)>")
 
@@ -282,7 +282,7 @@ def construir_codificador(doc: pymupdf.Document, xref: int,
     for codigo, texto in sorted(mapa.items()):
         if len(texto) == 1 and texto not in a_codigo:
             a_codigo[texto] = codigo
-    embebido = clasificar_embebido(nombre, subtipo, ext)
+    embebido = clasificar_fuente(doc, xref, nombre, subtipo, ext)
     disponibles = None
     if embebido in (Embebido.SUBCONJUNTO, Embebido.TYPE3):
         disponibles = usados if usados is not None else caracteres_usados(doc, nombre)

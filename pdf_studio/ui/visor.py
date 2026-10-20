@@ -13,10 +13,11 @@ import pymupdf
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
-                               QStyleOptionGraphicsItem, QWidget)
+                               QStyleOptionGraphicsItem, QToolTip, QWidget)
 
 from pdf_studio.core.documento import Documento
 from pdf_studio.ui.colocacion import ImagenColocable
+from pdf_studio.ui.tema import gestor
 
 SEPARACION = 16.0          # espacio entre páginas, en puntos
 ZOOM_MIN, ZOOM_MAX = 0.1, 8.0
@@ -43,8 +44,11 @@ class SeleccionTexto(QGraphicsRectItem):
     def __init__(self, rect: QRectF, pagina: int):
         super().__init__(rect)
         self.pagina = pagina
-        self.setPen(QPen(QColor(0, 120, 215), 0, Qt.PenStyle.DashLine))
-        self.setBrush(QBrush(QColor(0, 120, 215, 35)))
+        acento = QColor(gestor().paleta.acento)
+        self.setPen(QPen(acento, 0, Qt.PenStyle.DashLine))
+        relleno = QColor(acento)
+        relleno.setAlpha(40)
+        self.setBrush(QBrush(relleno))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.setZValue(40)
@@ -84,7 +88,10 @@ class Visor(QGraphicsView):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
-        self.setBackgroundBrush(QColor(0x52, 0x56, 0x59))
+        self.setAccessibleName("Página del documento")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.viewport().setMouseTracking(True)
+        self.aplicar_tema()
         self.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
@@ -106,6 +113,13 @@ class Visor(QGraphicsView):
         self._pos_seleccion: QPointF | None = None
         self.verticalScrollBar().valueChanged.connect(self._actualizar_pagina_actual)
         self.set_modo(Modo.MANO)
+
+    def aplicar_tema(self) -> None:
+        self.setBackgroundBrush(QColor(gestor().paleta.lienzo))
+        if getattr(self, "seleccion", None) is not None:
+            acento = QColor(gestor().paleta.acento)
+            self.seleccion.setPen(QPen(acento, 0, Qt.PenStyle.DashLine))
+        self.viewport().update()
 
     # ------------------------------------------------------------------ documento
     def set_documento(self, documento: Documento | None) -> None:
@@ -435,8 +449,11 @@ class Visor(QGraphicsView):
         if self._modo == Modo.RESALTAR and evento.button() == Qt.MouseButton.LeftButton:
             self._inicio_seleccion = self.mapToScene(evento.position().toPoint())
             self._rect_seleccion = QGraphicsRectItem(QRectF(self._inicio_seleccion, self._inicio_seleccion))
-            self._rect_seleccion.setPen(QPen(QColor(0, 120, 215), 0))
-            self._rect_seleccion.setBrush(QBrush(QColor(0, 120, 215, 40)))
+            acento = QColor(gestor().paleta.acento)
+            self._rect_seleccion.setPen(QPen(acento, 0))
+            relleno = QColor(acento)
+            relleno.setAlpha(40)
+            self._rect_seleccion.setBrush(QBrush(relleno))
             self._rect_seleccion.setZValue(20)
             self.scene().addItem(self._rect_seleccion)
             return
@@ -464,7 +481,26 @@ class Visor(QGraphicsView):
             actual = self.mapToScene(evento.position().toPoint())
             self._rect_seleccion.setRect(QRectF(self._inicio_seleccion, actual).normalized())
             return
+        if evento.buttons() == Qt.MouseButton.NoButton:
+            self._mostrar_nota(evento)
         super().mouseMoveEvent(evento)
+
+    def nota_en(self, punto_escena: QPointF) -> str | None:
+        """Texto de la nota que está bajo el punto, si hay una."""
+        destino = self.desde_escena(punto_escena)
+        if destino is None or self.documento is None:
+            return None
+        pagina, punto = destino
+        pag = self.documento.doc[pagina]       # la página tiene que vivir mientras se usan sus anotaciones
+        for annot in pag.annots(types=[pymupdf.PDF_ANNOT_TEXT]):
+            if annot.rect.contains(punto):
+                return annot.info.get("content") or ""
+        return None
+
+    def _mostrar_nota(self, evento) -> None:
+        texto = self.nota_en(self.mapToScene(evento.position().toPoint()))
+        if texto:
+            QToolTip.showText(evento.globalPosition().toPoint(), texto, self)
 
     def mouseDoubleClickEvent(self, evento) -> None:
         if self._modo == Modo.TEXTO:
