@@ -12,8 +12,9 @@ from pdf_studio.ui.visor import Modo
 
 
 @pytest.fixture
-def ventana(qtbot, monkeypatch):
-    v = VentanaPrincipal(chequear_al_iniciar=False)
+def ventana(qtbot, monkeypatch, tmp_path):
+    from pdf_studio.core.imagenes import BibliotecaFirmas
+    v = VentanaPrincipal(chequear_al_iniciar=False, biblioteca=BibliotecaFirmas(tmp_path / "firmas"))
     qtbot.addWidget(v)
     v.resize(1100, 800)
     v.show()

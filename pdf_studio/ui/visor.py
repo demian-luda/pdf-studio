@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsScene,
                                QStyleOptionGraphicsItem, QWidget)
 
 from pdf_studio.core.documento import Documento
+from pdf_studio.ui.colocacion import ImagenColocable
 
 SEPARACION = 16.0          # espacio entre páginas, en puntos
 ZOOM_MIN, ZOOM_MAX = 0.1, 8.0
@@ -60,6 +61,8 @@ class Visor(QGraphicsView):
     zoom_cambio = Signal(float)
     rect_seleccionado = Signal(int, object)   # (página, pymupdf.Rect sin rotar)
     punto_clic = Signal(int, object)          # (página, pymupdf.Point sin rotar)
+    colocacion_confirmada = Signal()          # Enter mientras se ubica una imagen
+    colocacion_cancelada = Signal()           # Esc mientras se ubica una imagen
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -71,6 +74,7 @@ class Visor(QGraphicsView):
         self.documento: Documento | None = None
         self.items: list[ItemPagina] = []
         self._zoom = 1.0
+        self._ajuste: str | None = "ancho"   # 'ancho', 'pagina' o None (zoom manual)
         self._cache: OrderedDict[tuple[int, int], QImage] = OrderedDict()
         self._cache_max = 24
         self._resultados: list[tuple[int, pymupdf.Rect]] = []
@@ -80,11 +84,13 @@ class Visor(QGraphicsView):
         self._modo = Modo.MANO
         self._inicio_seleccion: QPointF | None = None
         self._rect_seleccion: QGraphicsRectItem | None = None
+        self.colocacion: ImagenColocable | None = None
         self.verticalScrollBar().valueChanged.connect(self._actualizar_pagina_actual)
         self.set_modo(Modo.MANO)
 
     # ------------------------------------------------------------------ documento
     def set_documento(self, documento: Documento | None) -> None:
+        self.cancelar_colocacion()
         self.documento = documento
         self._resultados = []
         self._resultado_actual = -1
@@ -98,6 +104,11 @@ class Visor(QGraphicsView):
         pagina = self._pagina_actual
         self._cache.clear()
         escena = self.scene()
+        # La imagen que se está ubicando sobrevive a la reconstrucción de la escena
+        colocacion = self.colocacion
+        estado = colocacion.estado() if colocacion is not None else None
+        if colocacion is not None:
+            escena.removeItem(colocacion)
         escena.clear()
         self.items = []
         self._marcas = []
@@ -117,6 +128,9 @@ class Visor(QGraphicsView):
             y += r.height + SEPARACION
         escena.setSceneRect(QRectF(0, 0, ancho_max + 2 * SEPARACION, y))
         self._dibujar_resultados()
+        if colocacion is not None:
+            escena.addItem(colocacion)
+            colocacion.restaurar(estado)
         if self.items:
             self.ir_a_pagina(min(pagina, len(self.items) - 1))
 
@@ -174,7 +188,8 @@ class Visor(QGraphicsView):
     def _escala_pantalla(self) -> float:
         return self.logicalDpiX() / 72.0
 
-    def set_zoom(self, zoom: float, ancla: QPointF | None = None) -> None:
+    def set_zoom(self, zoom: float, ancla: QPointF | None = None, _ajuste: str | None = None) -> None:
+        self._ajuste = _ajuste
         zoom = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
         if ancla is None:
             ancla = QPointF(self.viewport().width() / 2, self.viewport().height() / 2)
@@ -183,6 +198,8 @@ class Visor(QGraphicsView):
         escala = zoom * self._escala_pantalla()
         self.resetTransform()
         self.scale(escala, escala)
+        if self.colocacion is not None:
+            self.colocacion.set_escala_vista(escala)
         # Mantiene el punto bajo el ancla en el mismo lugar de la pantalla
         nuevo = self.mapToScene(ancla.toPoint())
         delta = (nuevo - punto_escena) * escala
@@ -203,7 +220,7 @@ class Visor(QGraphicsView):
         ancho = self.scene().sceneRect().width()
         if ancho > 0:
             disponible = self.viewport().width() - 4
-            self.set_zoom(disponible / (ancho * self._escala_pantalla()))
+            self.set_zoom(disponible / (ancho * self._escala_pantalla()), _ajuste="ancho")
 
     def ajustar_pagina(self) -> None:
         if not self.items:
@@ -212,8 +229,16 @@ class Visor(QGraphicsView):
         vp = self.viewport()
         z = min((vp.width() - 4) / ((r.width() + 2 * SEPARACION) * self._escala_pantalla()),
                 (vp.height() - 4) / ((r.height() + 2 * SEPARACION) * self._escala_pantalla()))
-        self.set_zoom(z)
+        self.set_zoom(z, _ajuste="pagina")
         self.ir_a_pagina(self._pagina_actual)
+
+    def resizeEvent(self, evento) -> None:
+        super().resizeEvent(evento)
+        # Si el usuario eligió "ajustar", se mantiene al cambiar el tamaño de la ventana o los paneles
+        if self.items and self._ajuste == "ancho":
+            self.ajustar_ancho()
+        elif self.items and self._ajuste == "pagina":
+            self.ajustar_pagina()
 
     def wheelEvent(self, evento) -> None:
         if evento.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -261,6 +286,15 @@ class Visor(QGraphicsView):
         r = rect * pag.rotation_matrix
         return self.items[indice].mapRectToScene(QRectF(r.x0, r.y0, r.width, r.height))
 
+    def escena_a_pagina(self, indice: int, punto: QPointF) -> pymupdf.Point:
+        """Punto de la escena → punto PDF sin rotar de la página dada (aunque caiga afuera)."""
+        local = self.items[indice].mapFromScene(punto)
+        return pymupdf.Point(local.x(), local.y()) * self.documento.doc[indice].derotation_matrix
+
+    def pagina_mas_cercana(self, punto: QPointF) -> int:
+        return min(range(len(self.items)), key=lambda i: abs(self.items[i].sceneBoundingRect().center().y()
+                                                              - punto.y()))
+
     def desde_escena(self, punto: QPointF) -> tuple[int, pymupdf.Point] | None:
         """Punto de la escena → (página, punto PDF sin rotar)."""
         for item in self.items:
@@ -296,6 +330,57 @@ class Visor(QGraphicsView):
             marca.setZValue(10)
             self.scene().addItem(marca)
             self._marcas.append(marca)
+
+    # ------------------------------------------------------------------ colocación de imágenes
+    def iniciar_colocacion(self, item: ImagenColocable, pagina: int | None = None) -> None:
+        """Muestra la imagen flotante centrada en la parte visible de la página."""
+        self.cancelar_colocacion()
+        if not self.items:
+            return
+        pagina = self._pagina_actual if pagina is None else pagina
+        caja_pagina = self.items[pagina].sceneBoundingRect()
+        visible = self.mapToScene(self.viewport().rect()).boundingRect().intersected(caja_pagina)
+        centro = visible.center() if not visible.isEmpty() else caja_pagina.center()
+        self.colocacion = item
+        self.scene().addItem(item)
+        item.setPos(centro)
+        item.set_escala_vista(self.transform().m11())
+        item.setFocus()
+        self.set_modo(Modo.MANO)
+
+    def terminar_colocacion(self) -> tuple[int, tuple] | None:
+        """Saca la imagen flotante y devuelve (página, esquinas sin rotar)."""
+        item = self.colocacion
+        if item is None or not self.items:
+            return None
+        indice = self.pagina_mas_cercana(item.scenePos())
+        esquinas = tuple(tuple(self.escena_a_pagina(indice, p)) for p in item.esquinas_escena())
+        self.scene().removeItem(item)
+        self.colocacion = None
+        return indice, esquinas
+
+    def cancelar_colocacion(self) -> None:
+        if self.colocacion is not None:
+            self.scene().removeItem(self.colocacion)
+            self.colocacion = None
+
+    def keyPressEvent(self, evento) -> None:
+        if self.colocacion is not None:
+            tecla = evento.key()
+            if tecla in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.colocacion_confirmada.emit()
+                return
+            if tecla == Qt.Key.Key_Escape:
+                self.colocacion_cancelada.emit()
+                return
+            paso = 10.0 if evento.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
+            desplazamientos = {Qt.Key.Key_Left: (-paso, 0), Qt.Key.Key_Right: (paso, 0),
+                               Qt.Key.Key_Up: (0, -paso), Qt.Key.Key_Down: (0, paso)}
+            if tecla in desplazamientos:
+                dx, dy = desplazamientos[tecla]
+                self.colocacion.moveBy(dx, dy)
+                return
+        super().keyPressEvent(evento)
 
     # ------------------------------------------------------------------ herramientas de mouse
     @property

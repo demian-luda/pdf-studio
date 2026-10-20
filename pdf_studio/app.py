@@ -15,16 +15,15 @@ def _falta_paquete(nombre: str, error: Exception) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
-    try:
-        from PySide6.QtWidgets import QApplication
-    except ImportError as e:
-        return _falta_paquete("PySide6", e)
-    try:
-        import pymupdf  # noqa: F401
-    except ImportError as e:
-        return _falta_paquete("pymupdf", e)
+    import importlib
+    for modulo, paquete in (("PySide6.QtWidgets", "PySide6"), ("pymupdf", "pymupdf"), ("numpy", "numpy"),
+                            ("PIL", "Pillow"), ("fontTools", "fonttools")):
+        try:
+            importlib.import_module(modulo)
+        except ImportError as e:
+            return _falta_paquete(paquete, e)
 
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from pdf_studio import NOMBRE_APP
     from pdf_studio.ui.ventana_principal import VentanaPrincipal

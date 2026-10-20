@@ -63,7 +63,7 @@ PAQUETES = [
     PaquetePython("numpy", "numpy", "la verificación de fidelidad visual", Importancia.NECESARIO),
     PaquetePython("fontTools", "fonttools", "analizar e instalar fuentes", Importancia.NECESARIO),
     PaquetePython("pikepdf", "pikepdf", "verificar la estructura de los PDFs guardados", Importancia.RECOMENDADO),
-    PaquetePython("PIL", "Pillow", "las firmas en imagen (quitar fondo)", Importancia.OPCIONAL),
+    PaquetePython("PIL", "Pillow", "las firmas en imagen (quitar fondo)", Importancia.NECESARIO),
     PaquetePython("ocrmypdf", "ocrmypdf", "el OCR (reconocer texto en PDFs escaneados)", Importancia.OPCIONAL),
     PaquetePython("pyhanko", "pyHanko", "la firma digital con certificado", Importancia.OPCIONAL),
 ]

@@ -19,6 +19,7 @@ sys.path.insert(0, str(RAIZ))
 from pdf_studio.config import DIR_FUENTES_INCLUIDAS  # noqa: E402
 
 DESTINO = Path(__file__).resolve().parent / "pdfs_prueba"
+DESTINO_IMAGENES = Path(__file__).resolve().parent / "imagenes_prueba"
 A4 = pymupdf.paper_rect("a4")
 
 PARRAFO = ("El presupuesto anual de la cooperativa ficticia «Los Álamos» se aprobó en la asamblea "
@@ -209,8 +210,27 @@ def protegido() -> None:
              user_pw="1234", owner_pw="dueno-1234", permissions=-1)
 
 
+def firma_escaneada() -> None:
+    """Firma ficticia "escaneada": trazo azul sobre papel grisáceo con ruido, en JPG."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    ancho, alto = 900, 320
+    rng = np.random.default_rng(42)
+    papel = (232 + rng.normal(0, 6, (alto, ancho))).clip(0, 255).astype(np.uint8)
+    img = Image.merge("RGB", [Image.fromarray(papel)] * 3)
+    dibujo = ImageDraw.Draw(img)
+    t = np.linspace(0, 1, 400)
+    xs = 80 + 740 * t
+    ys = 170 + 70 * np.sin(t * 13) * np.exp(-t * 1.2) - 40 * t
+    dibujo.line(list(zip(xs.tolist(), ys.tolist())), fill=(25, 40, 120), width=7, joint="curve")
+    dibujo.line([(150, 250), (760, 235)], fill=(25, 40, 120), width=5)
+    img = img.filter(ImageFilter.GaussianBlur(1.2))
+    DESTINO_IMAGENES.mkdir(parents=True, exist_ok=True)
+    img.save(DESTINO_IMAGENES / "firma_escaneada.jpg", quality=88)
+
+
 GENERADORES = [texto_varias_paginas, tablas, imagen_fondo, formulario, escaneado,
-               fuentes_recortadas, protegido]
+               fuentes_recortadas, protegido, firma_escaneada]
 
 
 def main() -> None:

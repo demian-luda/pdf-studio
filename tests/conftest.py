@@ -17,7 +17,8 @@ DIR_PDFS = Path(__file__).resolve().parent / "pdfs_prueba"
 def _asegurar_pdfs() -> None:
     esperados = ["texto_varias_paginas.pdf", "tablas.pdf", "imagen_fondo.pdf", "formulario.pdf",
                  "escaneado.pdf", "fuentes_recortadas.pdf", "protegido.pdf"]
-    if not all((DIR_PDFS / n).is_file() for n in esperados):
+    imagen = DIR_PDFS.parent / "imagenes_prueba" / "firma_escaneada.jpg"
+    if not all((DIR_PDFS / n).is_file() for n in esperados) or not imagen.is_file():
         from tests import generar_pdfs_prueba
         generar_pdfs_prueba.main()
 

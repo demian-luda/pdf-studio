@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QImage, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QProgressDialog, QVBoxLayout,
                                QWidget)
@@ -17,19 +18,24 @@ from pdf_studio import NOMBRE_APP, __version__
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado
 from pdf_studio.core.fuentes import indice_incluidas, indice_sistema
+from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
+                                      tiene_transparencia)
 from pdf_studio.core.paginas import RotarPagina
 from pdf_studio.dependencias.chequeo import chequear_fuentes, chequear_inicio
 from pdf_studio.ui.busqueda import BarraBusqueda
+from pdf_studio.ui.colocacion import ImagenColocable
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
+from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.panel_faltantes import PanelFaltantes
 from pdf_studio.ui.visor import Modo, Visor
 
 
 class VentanaPrincipal(QMainWindow):
-    def __init__(self, chequear_al_iniciar: bool = True):
+    def __init__(self, chequear_al_iniciar: bool = True, biblioteca: BibliotecaFirmas | None = None):
         super().__init__()
         self.documento: Documento | None = None
+        self.biblioteca = biblioteca if biblioteca is not None else BibliotecaFirmas()
         self.setWindowTitle(NOMBRE_APP)
         self.resize(1280, 860)
         self.setAcceptDrops(True)
@@ -58,8 +64,15 @@ class VentanaPrincipal(QMainWindow):
         self.dock_faltantes.setObjectName("dock_faltantes")
         self.dock_faltantes.setWidget(self.faltantes)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_faltantes)
+        self.panel_firmas = PanelFirmas(self.biblioteca, self)
+        self.dock_firmas = QDockWidget("Firmas", self)
+        self.dock_firmas.setObjectName("dock_firmas")
+        self.dock_firmas.setWidget(self.panel_firmas)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_firmas)
+        self.tabifyDockWidget(self.dock_faltantes, self.dock_firmas)
         self.resizeDocks([self.dock_miniaturas, self.dock_faltantes], [170, 470], Qt.Orientation.Horizontal)
         self.dock_faltantes.hide()
+        self.dock_firmas.hide()
 
         # Barra de estado
         self.etiqueta_pagina = QLabel("", self)
@@ -114,6 +127,10 @@ class VentanaPrincipal(QMainWindow):
                                               "Arrastrá sobre el texto para resaltarlo.")
         self.acc_modo_nota = self._accion("Agregar nota", "Ctrl+Shift+N", lambda: self.set_modo(Modo.NOTA), True,
                                           "Hacé clic donde quieras dejar una nota.")
+        self.acc_insertar_imagen = self._accion("Insertar imagen desde archivo…", "Ctrl+Shift+I",
+                                                self.accion_insertar_imagen)
+        self.acc_firmas = self._accion("Firmas…", "Ctrl+Shift+F", self.mostrar_firmas,
+                                       tip="Biblioteca de firmas: agregar, quitar fondo e insertar.")
         for a in (self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota):
             self.grupo_modo.addAction(a)
         self.acc_modo_mano.setChecked(True)
@@ -142,7 +159,8 @@ class VentanaPrincipal(QMainWindow):
             m.addSeparator() if a is None else m.addAction(a)
         m = self.menuBar().addMenu("&Editar")
         for a in (self.acc_deshacer, self.acc_rehacer, None, self.acc_rotar_der, self.acc_rotar_izq,
-                  None, self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota):
+                  None, self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, None,
+                  self.acc_firmas, self.acc_insertar_imagen):
             m.addSeparator() if a is None else m.addAction(a)
         m = self.menuBar().addMenu("&Ver")
         for a in (self.acc_acercar, self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho,
@@ -160,7 +178,8 @@ class VentanaPrincipal(QMainWindow):
         for a in (self.acc_abrir, self.acc_guardar, None, self.acc_deshacer, self.acc_rehacer, None,
                   self.acc_alejar, self.acc_acercar, self.acc_ajustar_ancho, None,
                   self.acc_rotar_izq, self.acc_rotar_der, None,
-                  self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, None, self.acc_buscar):
+                  self.acc_modo_mano, self.acc_modo_resaltar, self.acc_modo_nota, None, self.acc_firmas,
+                  None, self.acc_buscar):
             barra.addSeparator() if a is None else barra.addAction(a)
 
     def _conectar(self) -> None:
@@ -171,6 +190,14 @@ class VentanaPrincipal(QMainWindow):
         self.miniaturas.pagina_elegida.connect(self.visor.ir_a_pagina)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
         self.faltantes.rechequear.connect(self.chequear_dependencias)
+        self.visor.colocacion_confirmada.connect(self.aplicar_colocacion)
+        self.visor.colocacion_cancelada.connect(self.cancelar_colocacion)
+        self.panel_firmas.insertar.connect(self.insertar_firma)
+        self.panel_firmas.agregar.connect(self.agregar_firma)
+        self.panel_firmas.quitar_fondo_de.connect(self.quitar_fondo_de_firma)
+        self.panel_firmas.eliminar.connect(self.eliminar_firma)
+        self.panel_firmas.aplicar_colocacion.connect(self.aplicar_colocacion)
+        self.panel_firmas.cancelar_colocacion.connect(self.cancelar_colocacion)
 
     # ------------------------------------------------------------------ diálogos (reemplazables en tests)
     def _pedir_ruta_abrir(self) -> str | None:
@@ -187,6 +214,18 @@ class VentanaPrincipal(QMainWindow):
             texto = "Contraseña incorrecta. Probá de nuevo:\n" + texto
         valor, ok = QInputDialog.getText(self, "Contraseña", texto, QLineEdit.EchoMode.Password)
         return valor if ok else None
+
+    def _pedir_ruta_imagen(self, titulo: str) -> str | None:
+        filtro = "Imágenes (" + " ".join(f"*{e}" for e in EXTENSIONES_IMAGEN) + ")"
+        ruta, _ = QFileDialog.getOpenFileName(self, titulo, "", filtro)
+        return ruta or None
+
+    def _editar_fondo(self, imagen: Image.Image, nombre: str) -> tuple[Image.Image, str] | None:
+        """Abre el diálogo Quitar fondo. Devuelve (imagen, nombre) o None si se canceló."""
+        dialogo = DialogoQuitarFondo(imagen, nombre, self)
+        if dialogo.exec() and dialogo.resultado is not None:
+            return dialogo.resultado, dialogo.nombre.text()
+        return None
 
     def _pedir_texto_nota(self) -> str | None:
         valor, ok = QInputDialog.getMultiLineText(self, "Nueva nota", "Texto de la nota:")
@@ -270,6 +309,7 @@ class VentanaPrincipal(QMainWindow):
         self.busqueda.set_documento(None)
         self.busqueda.hide()
         self.faltantes.set_documento(None, [])
+        self.panel_firmas.set_colocando(False)
         doc.cerrar()
         self._actualizar_estado()
         return True
@@ -325,6 +365,9 @@ class VentanaPrincipal(QMainWindow):
         return self._guardar_en(self.documento.ruta_original, sobrescribir=True)
 
     def _guardar_en(self, destino: Path, sobrescribir: bool = False) -> bool:
+        if self.visor.colocacion is not None:
+            # Se guarda lo que se ve: la imagen que se estaba ubicando se aplica primero
+            self.aplicar_colocacion()
         doc = self.documento
         dialogo = QProgressDialog("Verificando fidelidad visual…", "Cancelar", 0, 100, self)
         dialogo.setWindowTitle("Guardando")
@@ -389,6 +432,104 @@ class VentanaPrincipal(QMainWindow):
         if texto:
             self.documento.ejecutar(AgregarNota(pagina, (punto.x, punto.y), texto))
 
+    # ------------------------------------------------------------------ firmas e imágenes
+    def mostrar_firmas(self) -> None:
+        self.dock_firmas.show()
+        self.dock_firmas.raise_()
+
+    def agregar_firma(self) -> None:
+        ruta = self._pedir_ruta_imagen("Agregar firma a la biblioteca")
+        if not ruta:
+            return
+        try:
+            imagen = Image.open(ruta)
+            imagen.load()
+        except (OSError, Image.DecompressionBombError) as e:
+            self._informar("Agregar firma", f"No se pudo leer la imagen: {e}", error=True)
+            return
+        nombre = Path(ruta).stem
+        if tiene_transparencia(imagen) and not self._preguntar(
+                "Agregar firma", "La imagen ya tiene fondo transparente. ¿Querés ajustar el fondo igual?"):
+            final = self.biblioteca.agregar(imagen, nombre)
+        else:
+            editado = self._editar_fondo(imagen, nombre)
+            if editado is None:
+                return
+            final = self.biblioteca.agregar(*editado)
+        self.panel_firmas.recargar()
+        self.panel_firmas.seleccionar(final)
+        self.statusBar().showMessage(f"Firma guardada en la biblioteca: {final.name}", 5000)
+
+    def quitar_fondo_de_firma(self, ruta: Path) -> None:
+        with Image.open(ruta) as imagen:
+            imagen.load()
+            editado = self._editar_fondo(imagen.copy(), f"{ruta.stem} (sin fondo)")
+        if editado is not None:
+            final = self.biblioteca.agregar(*editado)
+            self.panel_firmas.recargar()
+            self.panel_firmas.seleccionar(final)
+
+    def eliminar_firma(self, ruta: Path) -> None:
+        if self._preguntar("Eliminar firma", f"¿Eliminar «{ruta.stem}» de la biblioteca?"):
+            self.biblioteca.eliminar(ruta)
+            self.panel_firmas.recargar()
+
+    def insertar_firma(self, ruta: Path) -> None:
+        self.iniciar_colocacion(Path(ruta).read_bytes(), "firma")
+
+    def accion_insertar_imagen(self) -> None:
+        if self.documento is None:
+            return
+        ruta = self._pedir_ruta_imagen("Insertar imagen")
+        if not ruta:
+            return
+        ruta = Path(ruta)
+        datos = ruta.read_bytes()
+        if ruta.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            # Otros formatos se pasan a PNG (sin pérdida); PNG y JPG se insertan tal cual
+            with Image.open(ruta) as imagen:
+                datos = a_png(imagen.convert("RGBA"))
+        self.iniciar_colocacion(datos, "imagen")
+
+    def iniciar_colocacion(self, datos: bytes, descripcion: str) -> bool:
+        if self.documento is None:
+            self._informar("Insertar", "Primero abrí un PDF.")
+            return False
+        imagen = QImage.fromData(datos)
+        if imagen.isNull():
+            self._informar("Insertar", "No se pudo leer la imagen.", error=True)
+            return False
+        pag = self.documento.doc[self.visor.pagina_actual]
+        # Tamaño inicial: el de la imagen a 150 dpi, sin pasar de la mitad del ancho de la página
+        ancho = min(imagen.width() * 72 / 150, pag.rect.width * 0.5)
+        ancho = max(ancho, 40.0)
+        self.set_modo(Modo.MANO)
+        self.visor.iniciar_colocacion(ImagenColocable(imagen, datos, ancho, descripcion))
+        self.panel_firmas.set_colocando(True)
+        self.mostrar_firmas()   # ahí están los botones Aplicar / Cancelar
+        self.visor.setFocus()
+        self.statusBar().showMessage("Ubicá la imagen y apretá Enter para aplicarla (Esc cancela).")
+        return True
+
+    def aplicar_colocacion(self) -> None:
+        item = self.visor.colocacion
+        resultado = self.visor.terminar_colocacion()
+        self.panel_firmas.set_colocando(False)
+        if resultado is None or self.documento is None:
+            return
+        pagina, esquinas = resultado
+        try:
+            self.documento.ejecutar(InsertarImagen(pagina, esquinas, item.datos, item.descripcion))
+        except ErrorDocumento as e:
+            self._informar("Insertar", str(e), error=True)
+            return
+        self.statusBar().showMessage(f"Se insertó la {item.descripcion} en la página {pagina + 1}.", 5000)
+
+    def cancelar_colocacion(self) -> None:
+        self.visor.cancelar_colocacion()
+        self.panel_firmas.set_colocando(False)
+        self.statusBar().clearMessage()
+
     def _documento_cambio(self) -> None:
         self.visor.recargar()
         self.miniaturas.recargar()
@@ -437,7 +578,8 @@ class VentanaPrincipal(QMainWindow):
         for a in (self.acc_guardar, self.acc_guardar_como, self.acc_sobrescribir, self.acc_cerrar,
                   self.acc_rotar_der, self.acc_rotar_izq, self.acc_buscar, self.acc_acercar,
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
-                  self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig):
+                  self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
+                  self.acc_insertar_imagen):
             a.setEnabled(hay)
         self.acc_deshacer.setEnabled(hay and self.documento.puede_deshacer)
         self.acc_rehacer.setEnabled(hay and self.documento.puede_rehacer)
