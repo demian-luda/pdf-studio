@@ -1,11 +1,17 @@
-﻿.venv/
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 build/
 dist/
 *.spec
 *.pfx
 *.p12
 *_editado.pdf
+*.pdfstudio-tmp
 .vscode/
 .idea/
+
+# PDFs: solo se versionan los de ejemplo de tests/pdfs_prueba (sin datos reales)
+*.pdf
+!tests/pdfs_prueba/*.pdf

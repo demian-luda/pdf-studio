@@ -1,0 +1,357 @@
+"""Visor de páginas: scroll continuo, zoom, resaltado de búsqueda y herramientas de mouse.
+
+Cada página es un ItemPagina en una QGraphicsScene. Las coordenadas de la escena
+están en puntos PDF (1/72") del espacio de la página ROTADA; la vista aplica el zoom.
+Las páginas se renderizan solo cuando se ven, y se guardan en una caché LRU.
+"""
+from __future__ import annotations
+
+from collections import OrderedDict
+from enum import Enum
+
+import pymupdf
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPen
+from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
+                               QStyleOptionGraphicsItem, QWidget)
+
+from pdf_studio.core.documento import Documento
+
+SEPARACION = 16.0          # espacio entre páginas, en puntos
+ZOOM_MIN, ZOOM_MAX = 0.1, 8.0
+MAX_PIXELES_COMPLETA = 16_000_000   # por encima de esto se renderiza solo la parte visible
+COLOR_RESULTADO = QColor(255, 220, 0, 90)
+COLOR_RESULTADO_ACTUAL = QColor(255, 120, 0, 130)
+
+
+class Modo(Enum):
+    MANO = "mano"
+    RESALTAR = "resaltar"
+    NOTA = "nota"
+
+
+def pixmap_a_qimage(pix: pymupdf.Pixmap) -> QImage:
+    formato = QImage.Format.Format_RGB888 if pix.n == 3 else QImage.Format.Format_RGBA8888
+    return QImage(pix.samples, pix.width, pix.height, pix.stride, formato).copy()
+
+
+class ItemPagina(QGraphicsItem):
+    def __init__(self, visor: "Visor", indice: int, ancho: float, alto: float):
+        super().__init__()
+        self.visor = visor
+        self.indice = indice
+        self._rect = QRectF(0, 0, ancho, alto)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
+
+    def boundingRect(self) -> QRectF:
+        return self._rect
+
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None):
+        painter.fillRect(self._rect, Qt.GlobalColor.white)
+        escala = painter.worldTransform().m11()
+        dpr = widget.devicePixelRatioF() if widget is not None else 1.0
+        self.visor.pintar_pagina(painter, self.indice, self._rect, option.exposedRect, escala * dpr)
+        painter.setPen(QPen(QColor(0, 0, 0, 60), 0))
+        painter.drawRect(self._rect)
+
+
+class Visor(QGraphicsView):
+    pagina_actual_cambio = Signal(int)
+    zoom_cambio = Signal(float)
+    rect_seleccionado = Signal(int, object)   # (página, pymupdf.Rect sin rotar)
+    punto_clic = Signal(int, object)          # (página, pymupdf.Point sin rotar)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setScene(QGraphicsScene(self))
+        self.setBackgroundBrush(QColor(0x52, 0x56, 0x59))
+        self.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
+        self.documento: Documento | None = None
+        self.items: list[ItemPagina] = []
+        self._zoom = 1.0
+        self._cache: OrderedDict[tuple[int, int], QImage] = OrderedDict()
+        self._cache_max = 24
+        self._resultados: list[tuple[int, pymupdf.Rect]] = []
+        self._resultado_actual = -1
+        self._marcas: list[QGraphicsRectItem] = []
+        self._pagina_actual = 0
+        self._modo = Modo.MANO
+        self._inicio_seleccion: QPointF | None = None
+        self._rect_seleccion: QGraphicsRectItem | None = None
+        self.verticalScrollBar().valueChanged.connect(self._actualizar_pagina_actual)
+        self.set_modo(Modo.MANO)
+
+    # ------------------------------------------------------------------ documento
+    def set_documento(self, documento: Documento | None) -> None:
+        self.documento = documento
+        self._resultados = []
+        self._resultado_actual = -1
+        self._pagina_actual = 0
+        self.recargar()
+        self.ajustar_ancho()
+        self.verticalScrollBar().setValue(self.verticalScrollBar().minimum())
+
+    def recargar(self) -> None:
+        """Rearma la escena (después de abrir, deshacer, rotar...). Mantiene la página visible."""
+        pagina = self._pagina_actual
+        self._cache.clear()
+        escena = self.scene()
+        escena.clear()
+        self.items = []
+        self._marcas = []
+        self._rect_seleccion = None
+        if self.documento is None:
+            escena.setSceneRect(QRectF())
+            return
+        doc = self.documento.doc
+        ancho_max = max((p.rect.width for p in doc), default=0)
+        y = SEPARACION
+        for i, pag in enumerate(doc):
+            r = pag.rect
+            item = ItemPagina(self, i, r.width, r.height)
+            item.setPos((ancho_max - r.width) / 2 + SEPARACION, y)
+            escena.addItem(item)
+            self.items.append(item)
+            y += r.height + SEPARACION
+        escena.setSceneRect(QRectF(0, 0, ancho_max + 2 * SEPARACION, y))
+        self._dibujar_resultados()
+        if self.items:
+            self.ir_a_pagina(min(pagina, len(self.items) - 1))
+
+    @property
+    def cantidad_paginas(self) -> int:
+        return len(self.items)
+
+    # ------------------------------------------------------------------ render
+    def pintar_pagina(self, painter: QPainter, indice: int, rect: QRectF, expuesto: QRectF,
+                      escala: float) -> None:
+        if self.documento is None:
+            return
+        pag = self.documento.doc[indice]
+        ancho_px = rect.width() * escala
+        alto_px = rect.height() * escala
+        if ancho_px * alto_px <= MAX_PIXELES_COMPLETA or pag.rotation:
+            img = self._imagen_completa(indice, escala, ancho_px * alto_px)
+            painter.drawImage(rect, img)
+        else:
+            # Zoom muy grande: se renderiza solo la zona visible, sin caché
+            zona = expuesto.intersected(rect)
+            if zona.isEmpty():
+                return
+            clip = pymupdf.Rect(zona.left(), zona.top(), zona.right(), zona.bottom())
+            pix = pag.get_pixmap(matrix=pymupdf.Matrix(escala, escala), clip=clip, alpha=False, annots=True)
+            painter.drawImage(zona, pixmap_a_qimage(pix))
+
+    def _imagen_completa(self, indice: int, escala: float, pixeles: float) -> QImage:
+        if pixeles > MAX_PIXELES_COMPLETA:
+            escala *= (MAX_PIXELES_COMPLETA / pixeles) ** 0.5
+        clave = (indice, int(escala * 100))
+        img = self._cache.get(clave)
+        if img is not None:
+            self._cache.move_to_end(clave)
+            return img
+        pag = self.documento.doc[indice]
+        pix = pag.get_pixmap(matrix=pymupdf.Matrix(clave[1] / 100, clave[1] / 100), alpha=False, annots=True)
+        img = pixmap_a_qimage(pix)
+        self._cache[clave] = img
+        while len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
+        return img
+
+    def imagen_pagina(self, indice: int, escala: float) -> QImage:
+        """Render de una página a la escala dada (también lo usan las miniaturas)."""
+        pag = self.documento.doc[indice]
+        return pixmap_a_qimage(pag.get_pixmap(matrix=pymupdf.Matrix(escala, escala), alpha=False))
+
+    # ------------------------------------------------------------------ zoom
+    @property
+    def zoom(self) -> float:
+        """Zoom relativo al tamaño real (1.0 = 100%)."""
+        return self._zoom
+
+    def _escala_pantalla(self) -> float:
+        return self.logicalDpiX() / 72.0
+
+    def set_zoom(self, zoom: float, ancla: QPointF | None = None) -> None:
+        zoom = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
+        if ancla is None:
+            ancla = QPointF(self.viewport().width() / 2, self.viewport().height() / 2)
+        punto_escena = self.mapToScene(ancla.toPoint())
+        self._zoom = zoom
+        escala = zoom * self._escala_pantalla()
+        self.resetTransform()
+        self.scale(escala, escala)
+        # Mantiene el punto bajo el ancla en el mismo lugar de la pantalla
+        nuevo = self.mapToScene(ancla.toPoint())
+        delta = (nuevo - punto_escena) * escala
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - round(delta.x()))
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - round(delta.y()))
+        self.zoom_cambio.emit(zoom)
+
+    def acercar(self) -> None:
+        self.set_zoom(self._zoom * 1.25)
+
+    def alejar(self) -> None:
+        self.set_zoom(self._zoom / 1.25)
+
+    def zoom_real(self) -> None:
+        self.set_zoom(1.0)
+
+    def ajustar_ancho(self) -> None:
+        ancho = self.scene().sceneRect().width()
+        if ancho > 0:
+            disponible = self.viewport().width() - 4
+            self.set_zoom(disponible / (ancho * self._escala_pantalla()))
+
+    def ajustar_pagina(self) -> None:
+        if not self.items:
+            return
+        r = self.items[self._pagina_actual].boundingRect()
+        vp = self.viewport()
+        z = min((vp.width() - 4) / ((r.width() + 2 * SEPARACION) * self._escala_pantalla()),
+                (vp.height() - 4) / ((r.height() + 2 * SEPARACION) * self._escala_pantalla()))
+        self.set_zoom(z)
+        self.ir_a_pagina(self._pagina_actual)
+
+    def wheelEvent(self, evento) -> None:
+        if evento.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.15 if evento.angleDelta().y() > 0 else 1 / 1.15
+            self.set_zoom(self._zoom * factor, evento.position())
+            evento.accept()
+        else:
+            super().wheelEvent(evento)
+
+    # ------------------------------------------------------------------ navegación
+    @property
+    def pagina_actual(self) -> int:
+        return self._pagina_actual
+
+    def ir_a_pagina(self, indice: int) -> None:
+        if not 0 <= indice < len(self.items):
+            return
+        item = self.items[indice]
+        arriba = item.mapToScene(QPointF(0, 0))
+        centro_x = self.mapToScene(self.viewport().rect().center()).x()
+        self.centerOn(centro_x, arriba.y() + self.viewport().height() / 2 / self.transform().m11()
+                      - SEPARACION / 2)
+        self._set_pagina_actual(indice)
+
+    def _set_pagina_actual(self, indice: int) -> None:
+        if indice != self._pagina_actual:
+            self._pagina_actual = indice
+            self.pagina_actual_cambio.emit(indice)
+
+    def _actualizar_pagina_actual(self) -> None:
+        if not self.items:
+            return
+        # La página actual es la que ocupa el centro superior de la vista
+        punto = self.mapToScene(self.viewport().width() // 2, self.viewport().height() // 3)
+        for item in self.items:
+            r = item.sceneBoundingRect()
+            if r.top() - SEPARACION <= punto.y() <= r.bottom() + SEPARACION / 2:
+                self._set_pagina_actual(item.indice)
+                return
+
+    # ------------------------------------------------------------------ coordenadas
+    def a_escena(self, indice: int, rect: pymupdf.Rect) -> QRectF:
+        """Rect de PDF sin rotar → rect en la escena."""
+        pag = self.documento.doc[indice]
+        r = rect * pag.rotation_matrix
+        return self.items[indice].mapRectToScene(QRectF(r.x0, r.y0, r.width, r.height))
+
+    def desde_escena(self, punto: QPointF) -> tuple[int, pymupdf.Point] | None:
+        """Punto de la escena → (página, punto PDF sin rotar)."""
+        for item in self.items:
+            if item.sceneBoundingRect().contains(punto):
+                local = item.mapFromScene(punto)
+                pag = self.documento.doc[item.indice]
+                return item.indice, pymupdf.Point(local.x(), local.y()) * pag.derotation_matrix
+        return None
+
+    # ------------------------------------------------------------------ búsqueda
+    def mostrar_resultados(self, resultados: list[tuple[int, pymupdf.Rect]], actual: int = -1) -> None:
+        self._resultados = resultados
+        self._resultado_actual = actual
+        self._dibujar_resultados()
+        if 0 <= actual < len(resultados):
+            pagina, rect = resultados[actual]
+            self.ensureVisible(self.a_escena(pagina, rect), 60, 120)
+            self._set_pagina_actual(pagina)
+
+    def _dibujar_resultados(self) -> None:
+        for m in self._marcas:
+            self.scene().removeItem(m)
+        self._marcas = []
+        if self.documento is None:
+            return
+        for n, (pagina, rect) in enumerate(self._resultados):
+            if pagina >= len(self.items):
+                continue
+            color = COLOR_RESULTADO_ACTUAL if n == self._resultado_actual else COLOR_RESULTADO
+            marca = QGraphicsRectItem(self.a_escena(pagina, rect))
+            marca.setBrush(QBrush(color))
+            marca.setPen(QPen(Qt.PenStyle.NoPen))
+            marca.setZValue(10)
+            self.scene().addItem(marca)
+            self._marcas.append(marca)
+
+    # ------------------------------------------------------------------ herramientas de mouse
+    @property
+    def modo(self) -> Modo:
+        return self._modo
+
+    def set_modo(self, modo: Modo) -> None:
+        self._modo = modo
+        if modo == Modo.MANO:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            cursor = Qt.CursorShape.IBeamCursor if modo == Modo.RESALTAR else Qt.CursorShape.PointingHandCursor
+            self.viewport().setCursor(cursor)
+
+    def mousePressEvent(self, evento) -> None:
+        if self._modo == Modo.RESALTAR and evento.button() == Qt.MouseButton.LeftButton:
+            self._inicio_seleccion = self.mapToScene(evento.position().toPoint())
+            self._rect_seleccion = QGraphicsRectItem(QRectF(self._inicio_seleccion, self._inicio_seleccion))
+            self._rect_seleccion.setPen(QPen(QColor(0, 120, 215), 0))
+            self._rect_seleccion.setBrush(QBrush(QColor(0, 120, 215, 40)))
+            self._rect_seleccion.setZValue(20)
+            self.scene().addItem(self._rect_seleccion)
+            return
+        if self._modo == Modo.NOTA and evento.button() == Qt.MouseButton.LeftButton:
+            destino = self.desde_escena(self.mapToScene(evento.position().toPoint()))
+            if destino is not None:
+                self.punto_clic.emit(*destino)
+            return
+        super().mousePressEvent(evento)
+
+    def mouseMoveEvent(self, evento) -> None:
+        if self._rect_seleccion is not None and self._inicio_seleccion is not None:
+            actual = self.mapToScene(evento.position().toPoint())
+            self._rect_seleccion.setRect(QRectF(self._inicio_seleccion, actual).normalized())
+            return
+        super().mouseMoveEvent(evento)
+
+    def mouseReleaseEvent(self, evento) -> None:
+        if self._rect_seleccion is not None and self._inicio_seleccion is not None:
+            rect = self._rect_seleccion.rect()
+            self.scene().removeItem(self._rect_seleccion)
+            self._rect_seleccion = None
+            self._inicio_seleccion = None
+            self._emitir_seleccion(rect)
+            return
+        super().mouseReleaseEvent(evento)
+
+    def _emitir_seleccion(self, rect_escena: QRectF) -> None:
+        origen = self.desde_escena(rect_escena.center())
+        if origen is None:
+            return
+        indice = origen[0]
+        item = self.items[indice]
+        local = item.mapRectFromScene(rect_escena).intersected(item.boundingRect())
+        pag = self.documento.doc[indice]
+        r = pymupdf.Rect(local.left(), local.top(), local.right(), local.bottom()) * pag.derotation_matrix
+        self.rect_seleccionado.emit(indice, r)

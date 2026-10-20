@@ -1,0 +1,13 @@
+[project]
+name = "pdf-studio"
+version = "0.1.0"
+description = "Editor de PDF universal y gratuito"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+markers = [
+    "red: tests que necesitan conexión a internet (se saltean con -m 'not red')",
+]
