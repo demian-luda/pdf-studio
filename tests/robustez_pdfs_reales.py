@@ -3,7 +3,8 @@
 Por cada PDF de la carpeta se corren varias pruebas, cada una sobre una COPIA temporal:
 abrir, analizar fuentes y renderizar; editar texto; OCR (si hay páginas escaneadas); importar
 la foto de una página escaneada; convertir las páginas escaneadas a documento editable
-(.docx y PDF con texto real); y las que suman las fases siguientes. Cada prueba guarda y
+(.docx y PDF con texto real); firmar con un certificado de prueba y validar; y las que
+suman las fases siguientes. Cada prueba guarda y
 verifica la fidelidad. Los originales nunca se modifican (se verifica su hash al final).
 
 El informe muestra SOLO el nombre del archivo, la prueba, la etapa y el tipo de error:
@@ -517,6 +518,56 @@ def estructura_de_tablas(rec) -> str:
             f"palabras bajo imágenes {solapes}")
 
 
+_CERTIFICADO: dict[str, Path] = {}
+
+
+def _certificado_de_prueba() -> Path:
+    """Uno solo por corrida, en una carpeta temporal (nunca en el repo)."""
+    if "ruta" not in _CERTIFICADO or not _CERTIFICADO["ruta"].exists():
+        from pdf_studio.core.firma_digital import crear_certificado_prueba
+        import atexit
+        carpeta = Path(tempfile.mkdtemp(prefix="pdfstudio_cert_"))
+        atexit.register(shutil.rmtree, carpeta, True)
+        _CERTIFICADO["ruta"] = carpeta / "prueba.pfx"
+        crear_certificado_prueba(_CERTIFICADO["ruta"], "Robustez PDF Studio", "robustez")
+    return _CERTIFICADO["ruta"]
+
+
+def prueba_firma(documento, tmp: Path) -> tuple[str, str]:
+    """Firma digital de una copia (visible en la primera página y otra invisible encima),
+    validación de las dos y fidelidad (la verifica la firma). Las firmas que ya tenga el PDF
+    tienen que seguir íntegras."""
+    from pdf_studio.core import firma_digital as fd
+    from pdf_studio.core.documento import ErrorDocumento, Limitacion
+    try:
+        fd.verificar_dependencias()
+    except ErrorDocumento as e:
+        return OMITIDA, f"no disponible ({_categoria(str(e))})"
+    previas = _etapa("validar previas", lambda: fd.validar(documento.ruta_base, documento.contrasena))
+    certificado = _certificado_de_prueba()
+    una, dos = tmp / "firmado_1.pdf", tmp / "firmado_2.pdf"
+    try:
+        _etapa("firmar visible", lambda: fd.firmar(documento.ruta_base, una, certificado, "robustez",
+                                                   fd.OpcionesFirma(visible=True, pagina=0, razon="Prueba"),
+                                                   documento.contrasena))
+    except Fallo as f:
+        if isinstance(f.error, Limitacion):
+            return AVISO, "no se firma, con aviso claro (" + ("cifrado" if "cifrado" in str(f.error) or
+                                                            "contraseña" in str(f.error) else "limitación") + ")"
+        raise
+    _etapa("firmar invisible", lambda: fd.firmar(una, dos, certificado, "robustez", fd.OpcionesFirma(),
+                                                 documento.contrasena))
+    estados = _etapa("validar", lambda: fd.validar(dos, documento.contrasena))
+    nuevas = estados[len(previas):]
+    if len(nuevas) != 2 or not all(e.valida for e in nuevas):
+        raise Fallo("validar", AssertionError("una firma nueva no es válida"))
+    rotas = [e for e, antes in zip(estados, previas) if antes.integra and not e.integra]
+    if rotas:
+        raise Fallo("firmas previas", AssertionError(f"{len(rotas)} firma(s) previa(s) dejaron de ser íntegras"))
+    extra = f"; {len(previas)} firma(s) previa(s) siguen íntegras" if previas else ""
+    return OK, f"2 firmas válidas, fidelidad verificada{extra}"
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -529,6 +580,7 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("comparar", prueba_comparar),
     ("importar foto", prueba_importar_foto),
     ("a editable", prueba_convertir),
+    ("firma digital", prueba_firma),
 ]
 
 

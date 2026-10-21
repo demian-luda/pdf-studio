@@ -552,7 +552,8 @@ def _es_texto(region: _Region, tinta: np.ndarray, palabras: list[PalabraTSV], al
                 and p.caja[3] - p.caja[1] <= 2.5 * alto_texto):
             legibles += 1
             seguras += p.conf >= 85
-            cubierta[max(0, p.caja[1] - y0):max(0, p.caja[3] - y0), max(0, p.caja[0] - x0):max(0, p.caja[2] - x0)] = True
+            cubierta[max(0, p.caja[1] - y0):max(0, p.caja[3] - y0),
+                     max(0, p.caja[0] - x0):max(0, p.caja[2] - x0)] = True
     if not legibles:
         return False
     resto = zona & ~cubierta
@@ -1113,5 +1114,6 @@ def convertir(paginas, tesseract: Path, tessdata: Path, carpeta: Path, total: in
         rec.avisos.append(f"{e} Solo se marcan como dudosas las palabras con baja confianza del OCR.")
     dudosas = len(rec.dudosas())
     if dudosas:
-        rec.avisos.append(f"Hay {dudosas} palabra{'s' if dudosas != 1 else ''} para revisar (baja confianza o fuera del diccionario).")
+        rec.avisos.append(f"Hay {dudosas} palabra{'s' if dudosas != 1 else ''} para revisar (baja confianza o "
+                          "fuera del diccionario).")
     return rec

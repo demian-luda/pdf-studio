@@ -27,6 +27,7 @@ from pdf_studio.core.ocr import (AgregarCapaOCR, ErrorOCR, ModoOCR, capas_de_tex
                                  parece_escaneado)
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
+from pdf_studio.core import firma_digital
 from pdf_studio.core.comparar import ResultadoComparacion
 from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
 from pdf_studio.core.escaneo import InformeEscaneo
@@ -52,6 +53,7 @@ from pdf_studio.ui.comparar import DialogoComparar
 from pdf_studio.ui.comunes import BarraAviso
 from pdf_studio.ui.dialogo_fidelidad import mostrar_guardado, preguntar_guardar_igual
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
+from pdf_studio.ui.firma_digital import DialogoCertificadoPrueba, DialogoFirmaDigital, DialogoValidarFirmas
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.formulario import PanelFormulario
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
@@ -112,6 +114,7 @@ class VentanaPrincipal(QMainWindow):
         self.aviso = BarraAviso(self)
         self.aviso.accion.connect(self._accion_aviso)
         self._accion_del_aviso = None
+        self._ultimo_certificado = ""          # se recuerda durante la sesión (la contraseña, nunca)
         centro = QWidget(self)
         capa = QVBoxLayout(centro)
         capa.setContentsMargins(0, 0, 0, 0)
@@ -295,6 +298,17 @@ class VentanaPrincipal(QMainWindow):
                                        tip="Biblioteca de firmas: agregar, quitar fondo e insertar.")
         self.acc_insertar_imagen = self._accion("Insertar imagen…", "image-plus", "Ctrl+Shift+I",
                                                 self.accion_insertar_imagen, grupo=F)
+        self.acc_firmar_digital = self._accion(
+            "Firmar con certificado…", "file-key", None, self.firmar_con_certificado, grupo=F,
+            tip="Firma digital con un certificado .pfx / .p12, visible o invisible, en una copia del PDF.",
+            corto="Firma digital")
+        self.acc_validar_firmas = self._accion(
+            "Validar firmas digitales…", "badge-check", None, self.validar_firmas, grupo=F,
+            tip="Quién firmó, si la firma es válida y si el documento cambió después.", corto="Validar firmas")
+        self.acc_certificado_prueba = self._accion(
+            "Crear certificado de prueba…", "key-round", None, self.crear_certificado_prueba, grupo=F,
+            tip="Un certificado autofirmado para probar la firma digital (no tiene validez legal).",
+            corto="Certificado de prueba")
 
         self.acc_buscar = self._accion("Buscar", "search", S.Find, self.abrir_busqueda, grupo=V)
         self.acc_acercar = self._accion("Acercar", "zoom-in", [S.ZoomIn, "Ctrl+="], self.visor.acercar, grupo=V)
@@ -416,8 +430,9 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_aplicar_redaccion, None, self.acc_formulario, self.acc_aplanar):
             editar.addSeparator() if a is None else editar.addAction(a)
         firmar = enc.agregar_pestana("Firmar")
-        for a in (self.acc_firmas, self.acc_insertar_imagen):
-            firmar.addAction(a)
+        for a in (self.acc_firmas, self.acc_insertar_imagen, None, self.acc_firmar_digital, self.acc_validar_firmas,
+                  self.acc_certificado_prueba):
+            firmar.addSeparator() if a is None else firmar.addAction(a)
         paginas = enc.agregar_pestana("Páginas")
         for a in (self.acc_rotar_izq, self.acc_rotar_der, self.acc_subir_pagina, self.acc_bajar_pagina, None,
                   self.acc_insertar_blanco, self.acc_insertar_pdf, self.acc_eliminar_paginas, None, self.acc_extraer, self.acc_separar, None, self.acc_marca_agua,
@@ -759,7 +774,11 @@ class VentanaPrincipal(QMainWindow):
             self.mostrar_aviso(f"Este PDF tiene un formulario con {n} campo{'s' if n != 1 else ''}. Podés "
                                "completarlo desde la barra lateral.", "Completar…",
                                lambda: self.mostrar_lateral("formulario"), "form-input")
-        if parece_escaneado(documento.doc):
+        if firma_digital.tiene_firmas(documento.doc):
+            self.mostrar_aviso("Este PDF tiene firmas digitales. Si lo editás y guardás una copia, esas firmas "
+                               "dejan de ser válidas en la copia (el original no cambia).", "Validar firmas…",
+                               self.validar_firmas, "badge-check")
+        elif parece_escaneado(documento.doc):
             self.mostrar_aviso("Este PDF parece escaneado: sus páginas son imágenes sin texto. Con el OCR "
                                "podés buscar, seleccionar y copiar el texto, sin que cambie su aspecto.",
                                "Reconocer texto…", self.reconocer_texto, "scan-text")
@@ -877,6 +896,12 @@ class VentanaPrincipal(QMainWindow):
         return self._guardar_en(self.documento.ruta_original, sobrescribir=True)
 
     def _guardar_en(self, destino: Path, sobrescribir: bool = False) -> bool:
+        if (self.documento.modificado and firma_digital.tiene_firmas(self.documento.doc)
+                and not self._preguntar("Guardar un PDF firmado",
+                                        "Este PDF tiene firmas digitales. Si guardás los cambios, las firmas van a "
+                                        "quedar inválidas en la copia (el original sigue firmado).\n\n"
+                                        "¿Guardar igual?")):
+            return False
         if self.visor.colocacion is not None:
             # Se guarda lo que se ve: la imagen que se estaba ubicando se aplica primero
             self.aplicar_colocacion()
@@ -1441,6 +1466,161 @@ class VentanaPrincipal(QMainWindow):
         if not guardado.es_fiel and not self._preguntar_guardar_igual(guardado):
             return None
         return guardado.ruta_temporal
+
+    # ------------------------------------------------------------------ firma digital
+    def _dialogo_firma_digital(self):
+        """(certificado, contraseña, opciones), "prueba" si se pidió crear un certificado de
+        prueba, o None si se canceló."""
+        dialogo = DialogoFirmaDigital(self.documento.doc.page_count, self.visor.pagina_actual,
+                                      BibliotecaFirmas().listar(), self._ultimo_certificado, self)
+        if dialogo.exec() == DialogoFirmaDigital.DialogCode.Accepted:
+            return dialogo.resultado()
+        return "prueba" if dialogo.crear_prueba else None
+
+    def _dialogo_certificado_prueba(self) -> tuple[str, str, int] | None:
+        dialogo = DialogoCertificadoPrueba(self)
+        return dialogo.resultado() if dialogo.exec() == DialogoCertificadoPrueba.DialogCode.Accepted else None
+
+    def _pedir_ruta_certificado(self, sugerida: Path) -> str | None:
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar el certificado de prueba", str(sugerida),
+                                              "Certificado con clave privada (*.pfx)")
+        return ruta or None
+
+    def _pedir_ruta_firmado(self, sugerida: Path) -> str | None:
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar el PDF firmado", str(sugerida), "Documentos PDF (*.pdf)")
+        return ruta or None
+
+    def _mostrar_validacion(self, estados, nombre: str, aviso: str) -> None:
+        DialogoValidarFirmas(estados, nombre, aviso, self).exec()
+
+    def _preguntar_abrir_firmado(self, texto: str, con_avisos: bool) -> bool:
+        caja = QMessageBox(QMessageBox.Icon.Warning if con_avisos else QMessageBox.Icon.Information,
+                           "Firmar con certificado", texto, parent=self)
+        abrir = caja.addButton("Abrir el PDF firmado", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton("Cerrar", QMessageBox.ButtonRole.RejectRole)
+        caja.setDefaultButton(abrir)
+        caja.exec()
+        return caja.clickedButton() is abrir
+
+    def firmar_con_certificado(self) -> bool:
+        """Firma digital del documento (tal como está, con sus cambios) en una copia nueva."""
+        if self.documento is None:
+            return False
+        try:
+            firma_digital.verificar_dependencias()
+        except Limitacion as e:
+            self._informar_error("Firmar con certificado", e)
+            return False
+        if self.proceso_tarea.ocupado:
+            self._informar("Firmar con certificado", "Esperá a que termine la tarea en curso.")
+            return False
+        entrada = self._preparar_estado_actual()
+        if entrada is None:
+            return False
+        while True:
+            elegido = self._dialogo_firma_digital()
+            if elegido != "prueba":
+                break
+            self.crear_certificado_prueba()
+        if elegido is None:
+            return False
+        certificado, contrasena, opciones = elegido
+        self._ultimo_certificado = certificado
+        original = self.documento.ruta_original
+        ruta = self._pedir_ruta_firmado(original.with_name(f"{original.stem}_firmado.pdf"))
+        if not ruta:
+            return False
+        destino = Path(ruta)
+        if destino.suffix.lower() != ".pdf":
+            destino = destino.with_suffix(".pdf")
+        if destino.resolve() in (original.resolve(), Path(entrada).resolve()):
+            self._informar("Firmar con certificado", "Elegí otro nombre: el PDF firmado se guarda como una copia "
+                                                     "nueva y el original no se modifica.")
+            return False
+        temporal = self.documento.carpeta_trabajo / "firmando.pdf"
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                preparada = firma_digital.preparar_firma(entrada, temporal, certificado, contrasena, opciones,
+                                                         self.documento.contrasena)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar_error("Firmar con certificado", e)
+            return False
+        # La contraseña del certificado no pasa al otro proceso: solo se verifica lo ya firmado
+        pedido = {"origen": str(entrada), "firma": preparada.a_dict(), "destino": str(destino),
+                  "contrasena": self.documento.contrasena}
+
+        def listo(ok: bool, resultado) -> None:
+            temporal.unlink(missing_ok=True)
+            if not ok:
+                self._informar_error("Firmar con certificado", resultado)
+                return
+            r = firma_digital.ResultadoFirma.desde_dict(resultado)
+            self.statusBar().showMessage(f"Firmado: {r.destino}", 10000)
+            texto = f"Se guardó el PDF firmado:\n{r.destino}\n\n{r.fidelidad}"
+            if r.avisos:
+                texto += "\n\n" + "\n".join(r.avisos)
+            if self._preguntar_abrir_firmado(texto, bool(r.avisos)):
+                self.abrir(r.destino)
+
+        return self.iniciar_tarea("verificar_firma", pedido, "Firmar con certificado",
+                                  "Verificando la firma y el aspecto de las páginas…", listo)
+
+    def validar_firmas(self) -> bool:
+        try:
+            firma_digital.verificar_dependencias()
+        except Limitacion as e:
+            self._informar_error("Validar firmas digitales", e)
+            return False
+        aviso = ""
+        if self.documento is not None:
+            ruta, contrasena = self.documento.ruta_original, self.documento.contrasena
+            if self.documento.modificado:
+                aviso = "Se validó el archivo tal como está guardado: los cambios sin guardar no cuentan."
+        else:
+            elegido = self._pedir_pdf_para_comparar("Elegir el PDF firmado")
+            if elegido is None:
+                return False
+            ruta, contrasena = elegido
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                estados = firma_digital.validar(ruta, contrasena)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar_error("Validar firmas digitales", e)
+            return False
+        if not estados:
+            self._informar("Validar firmas digitales", f"«{Path(ruta).name}» no tiene firmas digitales.")
+            return True
+        self._mostrar_validacion(estados, Path(ruta).name, aviso)
+        return True
+
+    def crear_certificado_prueba(self) -> Path | None:
+        datos = self._dialogo_certificado_prueba()
+        if datos is None:
+            return None
+        titular, contrasena, dias = datos
+        base = "".join(c for c in titular if c.isalnum() or c in " -_").strip().replace(" ", "_") or "prueba"
+        ruta = self._pedir_ruta_certificado(Path.home() / "Documents" / f"certificado_prueba_{base}.pfx")
+        if not ruta:
+            return None
+        destino = Path(ruta)
+        if destino.suffix.lower() not in (".pfx", ".p12"):
+            destino = destino.with_suffix(".pfx")
+        try:
+            info = firma_digital.crear_certificado_prueba(destino, titular, contrasena, dias)
+        except ErrorDocumento as e:
+            self._informar_error("Crear certificado de prueba", e)
+            return None
+        self._ultimo_certificado = str(destino)
+        self._informar("Crear certificado de prueba",
+                       f"Se creó el certificado de prueba:\n{destino}\n\n{info.descripcion()}\n\nGuardalo en un "
+                       "lugar seguro: con el archivo y su contraseña se puede firmar en tu nombre.")
+        return destino
 
     # ------------------------------------------------------------------ compresión
     def comprimir(self) -> bool:
@@ -2164,7 +2344,7 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_ocr, self.acc_eliminar_paginas, self.acc_insertar_blanco, self.acc_insertar_pdf,
                   self.acc_extraer, self.acc_separar, self.acc_marca_agua, self.acc_numerar, self.acc_comprimir,
                   self.acc_subir_pagina, self.acc_bajar_pagina, self.acc_modo_redactar, self.acc_buscar_redactar,
-                  self.acc_formulario, self.acc_borrar_metadatos):
+                  self.acc_formulario, self.acc_borrar_metadatos, self.acc_firmar_digital):
             a.setEnabled(hay)
         pendiente = hay and not self.redaccion_pendiente.vacia
         self.acc_aplicar_redaccion.setEnabled(pendiente)
