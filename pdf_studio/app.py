@@ -24,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
 
         from pdf_studio.procesos import ejecutar
         return ejecutar(argv[2], Path(argv[3]), Path(argv[4]))
+    if len(argv) > 2 and argv[1] == "--autoprueba":
+        # Comprueba que la versión empaquetada tenga todo (ver pdf_studio/autoprueba.py)
+        from pdf_studio.autoprueba import main as autoprueba
+        return autoprueba(argv[2])
     if len(argv) > 1 and argv[1] == "--ocrmypdf":
         # Proceso auxiliar (versión empaquetada): ocrmypdf con los argumentos que siguen
         import multiprocessing
