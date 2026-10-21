@@ -32,6 +32,7 @@ from pdf_studio.core.comparar import ResultadoComparacion
 from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
 from pdf_studio.core.escaneo import InformeEscaneo
 from pdf_studio.core.formularios import AplanarFormulario, CompletarFormulario, campos, tiene_formulario
+from pdf_studio.core.lotes import InformeLote, OpcionesLote
 from pdf_studio.core.redaccion import Coincidencia, LimpiarMetadatos, OpcionesRedaccion, Redaccion, Redactar
 from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePDF, InsertarPaginasEnBlanco,
                                      ReordenarPaginas, RotarPagina, extraer_paginas, mover_paginas,
@@ -56,6 +57,7 @@ from pdf_studio.ui.edicion_texto import DialogoEditarTexto
 from pdf_studio.ui.firma_digital import DialogoCertificadoPrueba, DialogoFirmaDigital, DialogoValidarFirmas
 from pdf_studio.ui.firmas import DialogoQuitarFondo, PanelFirmas
 from pdf_studio.ui.formulario import PanelFormulario
+from pdf_studio.ui.lotes import DialogoInformeLote, DialogoLotes
 from pdf_studio.ui.instalacion import DialogoConfirmarInstalacion, ejecutar_con_progreso
 from pdf_studio.ui.miniaturas import PanelMiniaturas
 from pdf_studio.ui.ocr import DialogoOCR
@@ -361,6 +363,10 @@ class VentanaPrincipal(QMainWindow):
             "Convertir escaneado a documento editable…", "file-pen", None, self.convertir_editable, grupo=H,
             tip="Un escaneo (PDF o fotos) → Word (.docx) editable: reconoce el texto, los títulos, las listas, las "
                 "tablas, el encabezado y el pie, y recorta logos, firmas y sellos.", corto="A Word editable")
+        self.acc_lotes = self._accion(
+            "Procesar por lotes…", "folder-cog", None, self.procesar_por_lotes, grupo=H,
+            tip="OCR, compresión, marca de agua, numeración o conversión a Word en todos los PDFs de una carpeta, "
+                "con registro.", corto="Por lotes")
         self.acc_comprimir = self._accion("Comprimir…", "shrink", None, self.comprimir, grupo=H,
                                           tip="Crea una copia más liviana y muestra el tamaño antes y después.")
         self.acc_comparar = self._accion("Comparar versiones…", "git-compare", "Ctrl+Shift+C", self.comparar_versiones,
@@ -440,7 +446,7 @@ class VentanaPrincipal(QMainWindow):
             paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
         for a in (self.acc_ocr, self.acc_convertir_editable, self.acc_importar_fotos, self.acc_comprimir,
-                  self.acc_borrar_metadatos, self.acc_comparar, None,
+                  self.acc_borrar_metadatos, self.acc_comparar, self.acc_lotes, None,
                   self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
@@ -1404,7 +1410,8 @@ class VentanaPrincipal(QMainWindow):
         if total > 0:
             progreso.setMaximum(total)
             progreso.setValue(min(hechas, total))
-            progreso.setLabelText(f"{self._texto_progreso}\nPágina {min(hechas + 1, total)} de {total}")
+            etiqueta = datos.get("etiqueta") or f"Página {min(hechas + 1, total)} de {total}"
+            progreso.setLabelText(f"{self._texto_progreso}\n{etiqueta}")
 
     def _carpeta_sin_documento(self) -> Path:
         import tempfile
@@ -1621,6 +1628,44 @@ class VentanaPrincipal(QMainWindow):
                        f"Se creó el certificado de prueba:\n{destino}\n\n{info.descripcion()}\n\nGuardalo en un "
                        "lugar seguro: con el archivo y su contraseña se puede firmar en tu nombre.")
         return destino
+
+    # ------------------------------------------------------------------ lotes
+    def _dialogo_lotes(self, carpeta: str, hay_ocr: bool) -> OpcionesLote | None:
+        dialogo = DialogoLotes(carpeta, hay_ocr, self)
+        return dialogo.resultado() if dialogo.exec() == DialogoLotes.DialogCode.Accepted else None
+
+    def _mostrar_informe_lote(self, informe: InformeLote) -> None:
+        DialogoInformeLote(informe, self).exec()
+
+    @staticmethod
+    def _hay_ocr() -> bool:
+        from pdf_studio.core import conversion
+        try:
+            import ocrmypdf  # noqa: F401
+            conversion.herramientas_ocr()
+            return True
+        except Exception:
+            return False
+
+    def procesar_por_lotes(self) -> bool:
+        if self.proceso_tarea.ocupado:
+            self._informar("Procesar por lotes", "Esperá a que termine la tarea en curso.")
+            return False
+        inicial = str(self.documento.ruta_original.parent) if self.documento is not None else ""
+        opciones = self._dialogo_lotes(inicial, self._hay_ocr())
+        if opciones is None:
+            return False
+
+        def listo(ok: bool, resultado) -> None:
+            if not ok:
+                self._informar_error("Procesar por lotes", resultado)
+                return
+            informe = InformeLote.desde_dict(resultado)
+            self.statusBar().showMessage(informe.resumen(), 10000)
+            self._mostrar_informe_lote(informe)
+
+        return self.iniciar_tarea("lotes", {"opciones": opciones.a_dict()}, "Procesar por lotes",
+                                  "Procesando los PDFs de la carpeta…", listo, con_avance=True)
 
     # ------------------------------------------------------------------ compresión
     def comprimir(self) -> bool:

@@ -568,6 +568,32 @@ def prueba_firma(documento, tmp: Path) -> tuple[str, str]:
     return OK, f"2 firmas válidas, fidelidad verificada{extra}"
 
 
+def prueba_lotes(documento, tmp: Path) -> tuple[str, str]:
+    """El archivo pasa por un lote (marca de agua, numeración y compresión baja) como lo haría
+    desde la interfaz: guardado verificado, resultado en otra carpeta. Solo se informa el
+    estado y las tareas hechas, nunca el contenido."""
+    from dataclasses import asdict
+
+    from pdf_studio.core import lotes
+    from pdf_studio.core.marcas import OpcionesMarca, OpcionesNumeracion
+    carpeta = tmp / "lote"
+    carpeta.mkdir()
+    shutil.copy2(documento.ruta_base, carpeta / "archivo.pdf")
+
+    def valores(o) -> dict:
+        return {k: (v.value if hasattr(v, "value") else v) for k, v in asdict(o).items() if k != "imagen"}
+    opciones = lotes.OpcionesLote(str(carpeta), marca=valores(OpcionesMarca(texto="PRUEBA")),
+                                  numeracion=valores(OpcionesNumeracion()), comprimir="bajo")
+    informe = _etapa("procesar lote", lambda: lotes.procesar_lote(opciones))
+    [r] = informe.resultados
+    if r.estado == lotes.ERROR:
+        raise Fallo("lote", AssertionError("el archivo terminó con error en el lote"))
+    if r.estado == lotes.OMITIDO:
+        return AVISO, "salteado con aviso claro"
+    hechas = sum(1 for m in r.mensajes if m in ("marca de agua", "numeración") or m.startswith("comprimido"))
+    return (OK if r.estado == lotes.OK else AVISO), f"{hechas} tarea(s) verificadas, registro escrito"
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -581,6 +607,7 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("importar foto", prueba_importar_foto),
     ("a editable", prueba_convertir),
     ("firma digital", prueba_firma),
+    ("lotes", prueba_lotes),
 ]
 
 

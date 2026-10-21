@@ -1,6 +1,6 @@
 """Tareas pesadas de MuPDF en un proceso aparte (comprimir, comparar versiones, informe de
 diferencias, importar fotos como PDF escaneado, convertir un escaneado a documento
-editable, verificar una firma digital recién hecha): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta de un
+editable, verificar una firma digital recién hecha, procesar por lotes): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta de un
 JSON con el pedido y escribe el resultado en otro JSON (y, si el pedido trae "progreso", el
 avance en un tercero). Nunca escribe contenido del documento en la salida estándar.
 
@@ -85,8 +85,21 @@ def _verificar_firma(pedido: dict) -> dict:
                            Path(pedido["destino"]), pedido.get("contrasena")).a_dict()
 
 
+def _lotes(pedido: dict) -> dict:
+    from pdf_studio.core.lotes import TEXTO_ESTADO, OpcionesLote, procesar_lote
+    progreso = _avisar_progreso(pedido.get("progreso"))
+
+    def avance(hechos: int, total: int, actual: str | None, ultimo) -> None:
+        etiqueta = f"Archivo {min(hechos + 1, total)} de {total}: {actual}" if actual else "Terminando…"
+        if ultimo is not None:
+            etiqueta += f"\nAnterior: {ultimo.archivo} — {TEXTO_ESTADO[ultimo.estado]}"
+        progreso(hechos, total, etiqueta)
+
+    return procesar_lote(OpcionesLote.desde_dict(pedido["opciones"]), avance).a_dict()
+
+
 TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe, "escaneo": _escaneo,
-          "convertir": _convertir, "verificar_firma": _verificar_firma}
+          "convertir": _convertir, "verificar_firma": _verificar_firma, "lotes": _lotes}
 
 
 def ejecutar(tarea: str, pedido_json: Path, resultado_json: Path) -> int:
