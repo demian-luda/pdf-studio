@@ -626,9 +626,9 @@ def _formas_sin_cambios(doc: pymupdf.Document, viejo: tuple[bytes, dict], nuevo:
         if not formas:
             igual = False      # una imagen reemplazada: no debería pasar (images=NONE)
             continue
-        if _formas_sin_cambios(doc, (doc.xref_stream(xv) or b"", _xobjects_de(doc, valor_de_clave(doc, xv, "Resources"))),
-                               (doc.xref_stream(xn) or b"", _xobjects_de(doc, valor_de_clave(doc, xn, "Resources"))),
-                               iguales, vistos):
+        def contenido(x: int) -> tuple[bytes, dict]:
+            return doc.xref_stream(x) or b"", _xobjects_de(doc, valor_de_clave(doc, x, "Resources"))
+        if _formas_sin_cambios(doc, contenido(xv), contenido(xn), iguales, vistos):
             iguales[xn] = xv
         else:
             igual = False

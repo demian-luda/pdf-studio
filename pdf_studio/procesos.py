@@ -1,5 +1,5 @@
 """Tareas pesadas de MuPDF en un proceso aparte (comprimir, comparar versiones, informe de
-diferencias): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta
+diferencias, importar fotos como PDF escaneado): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta
 de un JSON con el pedido y escribe el resultado en otro JSON. Nunca escribe contenido del
 documento en la salida estándar.
 
@@ -35,7 +35,13 @@ def _informe(pedido: dict) -> dict:
     return {"paginas": paginas}
 
 
-TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe}
+def _escaneo(pedido: dict) -> dict:
+    from pdf_studio.core.escaneo import AjusteFoto, OpcionesEscaneo, crear_pdf
+    fotos = [AjusteFoto.desde_dict(f) for f in pedido["fotos"]]
+    return crear_pdf(fotos, OpcionesEscaneo.desde_dict(pedido["opciones"]), Path(pedido["destino"])).a_dict()
+
+
+TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe, "escaneo": _escaneo}
 
 
 def ejecutar(tarea: str, pedido_json: Path, resultado_json: Path) -> int:

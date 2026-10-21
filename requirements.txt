@@ -27,6 +27,7 @@ networkx==3.7
 numpy==2.5.4
 ocrmypdf==17.13.0
 onnxruntime==1.31.0
+opencv-python-headless==5.0.0.93
 oscrypto==1.3.0
 packaging==26.3
 pdfminer.six==20260107

@@ -22,12 +22,14 @@ from pdf_studio.config import DIR_RECURSOS
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado, Limitacion
 from pdf_studio.core.fuentes import familia_de, indice_incluidas, indice_sistema
-from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrmypdf, crear_operacion,
-                                 entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto, parece_escaneado)
+from pdf_studio.core.ocr import (AgregarCapaOCR, ErrorOCR, ModoOCR, capas_de_texto, comando_ocrmypdf,
+                                 crear_operacion, entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto,
+                                 parece_escaneado)
 from pdf_studio.core.imagenes import (EXTENSIONES_IMAGEN, BibliotecaFirmas, InsertarImagen, a_png,
                                       tiene_transparencia)
 from pdf_studio.core.comparar import ResultadoComparacion
 from pdf_studio.core.comprimir import NivelCompresion, ResultadoCompresion
+from pdf_studio.core.escaneo import InformeEscaneo
 from pdf_studio.core.formularios import AplanarFormulario, CompletarFormulario, campos, tiene_formulario
 from pdf_studio.core.redaccion import Coincidencia, LimpiarMetadatos, OpcionesRedaccion, Redaccion, Redactar
 from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePDF, InsertarPaginasEnBlanco,
@@ -83,7 +85,7 @@ class VentanaPrincipal(QMainWindow):
         self._mostrar_tras_analisis = False
         self.proceso_ocr = ProcesoExterno(self)
         self.proceso_ocr.terminado.connect(self._ocr_terminado)
-        self._ocr: tuple | None = None            # (modo, páginas, salida, documento) del OCR en curso
+        self._ocr = None                          # al_terminar(código, error) del OCR en curso
         self._progreso_ocr: QProgressDialog | None = None
         # Tareas pesadas de MuPDF (comprimir, comparar) en otro proceso
         self.proceso_tarea = ProcesoExterno(self)
@@ -332,6 +334,10 @@ class VentanaPrincipal(QMainWindow):
                                           grupo=H, tip="Modo armónico: reemplaza una fuente en todo el documento.")
         self.acc_ocr = self._accion("Reconocer texto (OCR)…", "scan-text", "Ctrl+Shift+O", self.reconocer_texto,
                                     grupo=H, tip="Hace buscable y copiable el texto de páginas escaneadas.")
+        self.acc_importar_fotos = self._accion(
+            "Importar imágenes como PDF escaneado…", "images", None, self.importar_fotos, grupo=H,
+            tip="Fotos de documentos → PDF: recorta el papel, corrige perspectiva e inclinación, mejora el "
+                "contraste y, si querés, reconoce el texto.", corto="Importar fotos")
         self.acc_comprimir = self._accion("Comprimir…", "shrink", None, self.comprimir, grupo=H,
                                           tip="Crea una copia más liviana y muestra el tamaño antes y después.")
         self.acc_comparar = self._accion("Comparar versiones…", "git-compare", "Ctrl+Shift+C", self.comparar_versiones,
@@ -409,7 +415,8 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_numerar):
             paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_ocr, self.acc_comprimir, self.acc_borrar_metadatos, self.acc_comparar, None,
+        for a in (self.acc_ocr, self.acc_importar_fotos, self.acc_comprimir, self.acc_borrar_metadatos,
+                  self.acc_comparar, None,
                   self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
@@ -543,6 +550,14 @@ class VentanaPrincipal(QMainWindow):
             QApplication.restoreOverrideCursor()
         if dialogo.exec() and dialogo.plan is not None and dialogo.plan.operacion is not None:
             return dialogo.plan
+        return None
+
+    def _dialogo_importar_fotos(self, ocr_disponible: bool, motivo: str):
+        """(fotos, opciones, con OCR) o None si se canceló."""
+        from pdf_studio.ui.escaneo import DialogoImportarFotos
+        dialogo = DialogoImportarFotos(None, ocr_disponible, motivo, self)
+        if dialogo.exec() and dialogo.fotos:
+            return list(dialogo.fotos), dialogo.opciones(), dialogo.con_ocr
         return None
 
     def _dialogo_ocr(self, sin_texto: list[int]) -> tuple[ModoOCR, list[int]] | None:
@@ -1286,12 +1301,14 @@ class VentanaPrincipal(QMainWindow):
         progreso.show()
         return progreso
 
-    def iniciar_tarea(self, tarea: str, pedido: dict, titulo: str, texto: str, al_terminar) -> bool:
+    def iniciar_tarea(self, tarea: str, pedido: dict, titulo: str, texto: str, al_terminar,
+                      carpeta: Path | None = None) -> bool:
         """Corre una tarea de pdf_studio.procesos sin trabar la interfaz.
         al_terminar(ok, resultado o mensaje de error)."""
         if self.proceso_tarea.ocupado:
             return False
-        carpeta = self.documento.carpeta_trabajo if self.documento is not None else self._carpeta_sin_documento()
+        if carpeta is None:
+            carpeta = self.documento.carpeta_trabajo if self.documento is not None else self._carpeta_sin_documento()
         archivo_pedido, archivo_resultado = carpeta / f"{tarea}_pedido.json", carpeta / f"{tarea}_resultado.json"
         archivo_resultado.unlink(missing_ok=True)
         archivo_pedido.write_text(json.dumps(pedido), encoding="utf-8")
@@ -1486,6 +1503,129 @@ class VentanaPrincipal(QMainWindow):
         return self.iniciar_tarea("informe", pedido, "Exportar informe", "Armando el informe de diferencias…",
                                   listo)
 
+    # ------------------------------------------------------------------ importar fotos
+    def importar_fotos(self) -> bool:
+        """Fotos de documentos → PDF escaneado (en otro proceso) y, si se pidió, OCR idéntico.
+        Al final se abre el PDF nuevo. Las fotos nunca se modifican."""
+        from pdf_studio.core.escaneo import cv2
+        if self.proceso_tarea.ocupado or self.proceso_ocr.ocupado:
+            return False
+        try:
+            cv2()
+        except Limitacion as e:
+            self._informar_error("Importar fotos", e)
+            self.chequear_dependencias(mostrar=True)
+            return False
+        motivo = ""
+        try:
+            entorno_ocr()
+        except ErrorOCR as e:
+            motivo = str(e)
+        eleccion = self._dialogo_importar_fotos(not motivo, motivo)
+        if eleccion is None:
+            return False
+        fotos, opciones, con_ocr = eleccion
+        primera = Path(fotos[0].ruta)
+        ruta = self._pedir_ruta_guardar(primera.with_name(f"{primera.stem}_escaneado.pdf"))
+        if not ruta:
+            return False
+        destino = Path(ruta).with_suffix(".pdf")
+        if self.documento is not None and destino.resolve() == self.documento.ruta_original:
+            self._informar("Importar fotos", "Elegiste el documento abierto: para no perderlo, el PDF nuevo se "
+                                             "guarda con otro nombre.")
+            return False
+        carpeta = self._carpeta_sin_documento()
+        salida = carpeta / "escaneo.pdf" if con_ocr else destino
+        pedido = {"fotos": [f.a_dict() for f in fotos], "opciones": opciones.a_dict(), "destino": str(salida)}
+
+        def listo(ok: bool, resultado) -> None:
+            if not ok:
+                self._informar_error("Importar fotos", resultado)
+                return
+            informe = InformeEscaneo.desde_dict(resultado)
+            if con_ocr:
+                self._ocr_de_importacion(salida, destino, informe)
+            else:
+                self._importacion_terminada(destino, informe)
+
+        n = len(fotos)
+        return self.iniciar_tarea("escaneo", pedido, "Importar fotos",
+                                  f"Procesando {n} foto{'s' if n != 1 else ''}: recorte, perspectiva y contraste…",
+                                  listo, carpeta=carpeta)
+
+    def _ocr_de_importacion(self, entrada: Path, destino: Path, informe: InformeEscaneo) -> None:
+        """OCR idéntico sobre el PDF recién armado; el resultado se escribe en `destino`."""
+        salida = entrada.with_name("escaneo_ocr.pdf")
+        salida.unlink(missing_ok=True)
+        paginas = list(range(informe.paginas))
+        try:
+            entorno = entorno_ocr()
+        except ErrorOCR as e:
+            informe.avisos.append(f"No se reconoció el texto: {e}")
+            self._escribir_importacion(entrada, None, destino, informe)
+            return
+        programa, argumentos = comando_ocrmypdf(entrada, salida, paginas)
+
+        def terminado(codigo: int, error: str) -> None:
+            if codigo != 0:
+                mensaje = error if codigo < 0 else mensaje_de_error_ocrmypdf(codigo, error)
+                registro().error("El OCR de la importación falló (código %s): %s", codigo, mensaje)
+                informe.avisos.append(f"No se pudo reconocer el texto ({mensaje}). El PDF quedó sin OCR.")
+                self._escribir_importacion(entrada, None, destino, informe)
+                return
+            self._escribir_importacion(entrada, salida, destino, informe)
+
+        self._iniciar_ocr(programa, argumentos, entorno, len(paginas), terminado)
+
+    def _escribir_importacion(self, entrada: Path, salida_ocr: Path | None, destino: Path,
+                              informe: InformeEscaneo) -> None:
+        """Agrega la capa de texto (si la hay) verificando que ninguna página cambie de
+        aspecto, y escribe el PDF final en `destino`."""
+        from pdf_studio.core.fidelidad import comparar_paginas
+        temporal = destino.with_name(destino.name + ".pdfstudio-tmp")
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                capas: dict[int, bytes] = {}
+                if salida_ocr is not None:
+                    try:
+                        capas = capas_de_texto(salida_ocr, list(range(informe.paginas)))
+                    except ErrorDocumento as e:
+                        informe.avisos.append(f"{e} El PDF quedó sin OCR.")
+                    except Exception:
+                        registro().exception("No se pudo leer el resultado del OCR de la importación")
+                        informe.avisos.append("No se pudo leer el resultado del OCR: el PDF quedó sin OCR.")
+                if capas:
+                    with pymupdf.open(entrada) as doc, pymupdf.open(entrada) as antes:
+                        AgregarCapaOCR(capas).aplicar(doc)
+                        distintas = [p + 1 for p in capas if comparar_paginas(antes[p], doc[p], 72)[0] != 0]
+                        if not distintas:
+                            doc.save(temporal, garbage=3, deflate=True)
+                            informe.ocr = True
+                    if distintas:
+                        # No se guarda un resultado que cambió de aspecto: queda sin OCR
+                        informe.avisos.append(f"El OCR habría cambiado el aspecto de la página {distintas[0]}: "
+                                              "el PDF quedó sin OCR.")
+                if not informe.ocr:
+                    shutil.copy2(entrada, temporal)
+                temporal.replace(destino)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except OSError as e:
+            temporal.unlink(missing_ok=True)
+            self._informar("Importar fotos", f"No se pudo escribir {destino}: {e}", error=True)
+            return
+        self._importacion_terminada(destino, informe)
+
+    def _importacion_terminada(self, destino: Path, informe: InformeEscaneo) -> None:
+        n = informe.paginas
+        texto = f"Se creó «{destino.name}» con {n} página{'s' if n != 1 else ''}"
+        texto += " y el texto reconocido (se puede buscar y copiar)." if informe.ocr else "."
+        if informe.avisos:
+            texto += "\n\n" + "\n".join(f"• {a}" for a in informe.avisos)
+        self._informar("Importar fotos", texto)
+        self.abrir(destino)
+
     # ------------------------------------------------------------------ OCR
     def reconocer_texto(self) -> bool:
         """Pide modo y páginas, y corre ocrmypdf en otro proceso (la interfaz sigue respondiendo)."""
@@ -1511,9 +1651,14 @@ class VentanaPrincipal(QMainWindow):
             self._informar("Reconocer texto", f"No se pudo preparar el OCR ({type(e).__name__}).", error=True)
             return False
         programa, argumentos = comando_ocrmypdf(entrada, salida, paginas)
-        self._ocr = (modo, paginas, salida, self.documento)
+        documento = self.documento
+        self._iniciar_ocr(programa, argumentos, entorno, len(paginas),
+                          lambda codigo, error: self._ocr_listo(modo, paginas, salida, documento, codigo, error))
+        return True
+
+    def _iniciar_ocr(self, programa: str, argumentos: list[str], entorno: dict, n: int, al_terminar) -> None:
+        self._ocr = al_terminar
         self.proceso_ocr.iniciar(programa, argumentos, entorno)
-        n = len(paginas)
         progreso = QProgressDialog(f"Reconociendo texto en {n} página{'s' if n != 1 else ''}…", "Cancelar",
                                    0, 0, self)
         progreso.setWindowTitle("Reconocer texto (OCR)")
@@ -1523,7 +1668,6 @@ class VentanaPrincipal(QMainWindow):
         progreso.show()
         self._progreso_ocr = progreso
         self._estado_analisis()
-        return True
 
     def cancelar_ocr(self) -> None:
         if self.proceso_ocr.cancelar():
@@ -1542,9 +1686,11 @@ class VentanaPrincipal(QMainWindow):
     def _ocr_terminado(self, codigo: int, error: str) -> None:
         self._cerrar_progreso_ocr()
         pendiente, self._ocr = self._ocr, None
-        if pendiente is None:
-            return
-        modo, paginas, salida, documento = pendiente
+        if pendiente is not None:
+            pendiente(codigo, error)
+
+    def _ocr_listo(self, modo: ModoOCR, paginas: list[int], salida: Path, documento: Documento,
+                   codigo: int, error: str) -> None:
         if documento is not self.documento:
             return
         if codigo != 0:

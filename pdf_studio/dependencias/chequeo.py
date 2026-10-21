@@ -73,6 +73,8 @@ PAQUETES = [
     PaquetePython("ocrmypdf", "ocrmypdf", "el OCR (reconocer texto en PDFs escaneados)", Importancia.OPCIONAL,
                   "MPL-2.0"),
     PaquetePython("pyhanko", "pyHanko", "la firma digital con certificado", Importancia.OPCIONAL, "MIT"),
+    PaquetePython("cv2", "opencv-python-headless", "importar fotos como PDF escaneado (recorte y perspectiva)",
+                  Importancia.OPCIONAL, "Apache-2.0"),
 ]
 
 

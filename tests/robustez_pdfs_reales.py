@@ -1,9 +1,9 @@
 """Prueba de robustez con PDFs reales (no se commitean: tienen datos sensibles).
 
 Por cada PDF de la carpeta se corren varias pruebas, cada una sobre una COPIA temporal:
-abrir, analizar fuentes y renderizar; editar texto; OCR (si hay páginas escaneadas); y
-las que suman las fases siguientes. Cada prueba guarda y verifica la fidelidad. Los
-originales nunca se modifican (se verifica su hash al final).
+abrir, analizar fuentes y renderizar; editar texto; OCR (si hay páginas escaneadas); importar
+la foto de una página escaneada; y las que suman las fases siguientes. Cada prueba guarda y
+verifica la fidelidad. Los originales nunca se modifican (se verifica su hash al final).
 
 El informe muestra SOLO el nombre del archivo, la prueba, la etapa y el tipo de error:
 nada de contenido, textos extraídos ni datos del documento.
@@ -368,6 +368,44 @@ def prueba_comparar(documento, tmp: Path) -> tuple[str, str]:
     return OK, f"igual consigo mismo; cambio detectado solo en la pág. editada; informe de {paginas} pág."
 
 
+def prueba_importar_foto(documento, tmp: Path) -> tuple[str, str]:
+    """La foto de una página escaneada pasa por «Importar imágenes como PDF escaneado»: se
+    detecta (o no) el papel, se corrige y se arma un PDF que se tiene que poder abrir."""
+    import pymupdf
+
+    from pdf_studio.core import escaneo, ocr
+    from pdf_studio.core.documento import ErrorDocumento
+    doc = documento.doc
+    sin_texto = _etapa("detectar escaneo", lambda: ocr.paginas_sin_texto(doc))
+    if not sin_texto:
+        return OMITIDA, "no hay páginas escaneadas"
+    imagenes = _etapa("extraer foto", lambda: doc[sin_texto[0]].get_images(full=True))
+    if not imagenes:
+        return OMITIDA, "la página no tiene una foto"
+    xref = max(imagenes, key=lambda i: i[2] * i[3])[0]
+    foto = tmp / "foto.png"
+    _etapa("extraer foto", lambda: pymupdf.Pixmap(doc, xref).save(foto))
+    hash_foto = _hash(foto)
+    destino = tmp / "importada.pdf"
+    try:
+        informe = escaneo.crear_pdf([escaneo.AjusteFoto(str(foto))], escaneo.OpcionesEscaneo(), destino)
+    except ErrorDocumento as e:
+        return AVISO, f"importación rechazada con aviso ({_categoria(str(e))})"
+    except Exception as e:
+        raise Fallo("importar", e) from e
+    if _hash(foto) != hash_foto:
+        raise Fallo("importar", AssertionError("se modificó la foto"))
+
+    def releer():
+        with pymupdf.open(destino) as d:
+            if d.page_count != 1:
+                raise AssertionError("cantidad de páginas")
+            d[0].get_pixmap(dpi=30)
+    _etapa("releer importada", releer)
+    papel = "papel detectado" if not informe.avisos else "sin borde de papel (foto entera)"
+    return OK, f"PDF armado y legible ({papel})"
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -378,6 +416,7 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("redacción", prueba_redaccion),
     ("formulario", prueba_formulario),
     ("comparar", prueba_comparar),
+    ("importar foto", prueba_importar_foto),
 ]
 
 
