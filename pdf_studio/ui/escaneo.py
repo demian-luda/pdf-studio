@@ -178,9 +178,13 @@ class VistaResultado(QLabel):
 
 class DialogoImportarFotos(QDialog):
     def __init__(self, rutas: list[str | Path] | None = None, ocr_disponible: bool = True,
-                 motivo_sin_ocr: str = "", parent: QWidget | None = None):
+                 motivo_sin_ocr: str = "", parent: QWidget | None = None, para_convertir: bool = False):
+        """`para_convertir`: las fotos van a «Convertir escaneado a documento editable» (el texto
+        se reconoce igual, así que no se ofrece el OCR idéntico)."""
         super().__init__(parent)
-        self.setWindowTitle("Importar imágenes como PDF escaneado")
+        self.para_convertir = para_convertir
+        self.setWindowTitle("Fotos para convertir a documento editable" if para_convertir
+                            else "Importar imágenes como PDF escaneado")
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.resize(1200, 820)
         self.fotos: list[AjusteFoto] = []
@@ -256,8 +260,8 @@ class DialogoImportarFotos(QDialog):
             self.resolucion.addItem(f"{dpi} ppp" + ("  (recomendada)" if dpi == 200 else ""), dpi)
         self.resolucion.setCurrentIndex(RESOLUCIONES.index(200))
         self.ocr = QCheckBox("Reconocer texto (OCR idéntico: se ve igual, pero se puede buscar y copiar)", self)
-        self.ocr.setChecked(ocr_disponible)
-        self.ocr.setEnabled(ocr_disponible)
+        self.ocr.setChecked(ocr_disponible and not para_convertir)
+        self.ocr.setEnabled(ocr_disponible and not para_convertir)
         grupo = QGroupBox("Opciones", self)
         formulario = QFormLayout(grupo)
         formulario.addRow(self.recortar)
@@ -265,15 +269,21 @@ class DialogoImportarFotos(QDialog):
         formulario.addRow("Mejora del contraste:", self.mejora)
         formulario.addRow("Tamaño de página:", self.tamano)
         formulario.addRow("Resolución:", self.resolucion)
-        formulario.addRow(self.ocr)
-        if not ocr_disponible:
+        if para_convertir:
+            self.ocr.hide()
+            self.resolucion.setEnabled(False)
+            self.resolucion.setToolTip("Para reconocer el texto se usa siempre 300 ppp.")
+        else:
+            formulario.addRow(self.ocr)
+        if not ocr_disponible and not para_convertir:
             formulario.addRow(tarjeta_informativa(motivo_sin_ocr or "El OCR no está disponible: revisá el panel "
                                                   "Faltantes.", grupo))
         for control in (self.recortar, self.enderezar):
             control.toggled.connect(self._programar)
         self.mejora.currentIndexChanged.connect(self._programar)
 
-        self.botones = botonera(self, "Crear PDF…", "file-scan")
+        self.botones = botonera(self, "Convertir" if para_convertir else "Crear PDF…",
+                                "scan-text" if para_convertir else "file-scan")
         self.boton_crear = self.botones.button(QDialogButtonBox.StandardButton.Ok)
 
         divisor = QSplitter(Qt.Orientation.Horizontal, self)

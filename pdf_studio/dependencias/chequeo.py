@@ -75,6 +75,8 @@ PAQUETES = [
     PaquetePython("pyhanko", "pyHanko", "la firma digital con certificado", Importancia.OPCIONAL, "MIT"),
     PaquetePython("cv2", "opencv-python-headless", "importar fotos como PDF escaneado (recorte y perspectiva)",
                   Importancia.OPCIONAL, "Apache-2.0"),
+    PaquetePython("docx", "python-docx", "convertir escaneados a documentos de Word editables (.docx)",
+                  Importancia.OPCIONAL, "MIT"),
 ]
 
 

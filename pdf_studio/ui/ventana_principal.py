@@ -92,6 +92,11 @@ class VentanaPrincipal(QMainWindow):
         self.proceso_tarea.terminado.connect(self._tarea_terminada)
         self._tarea: tuple | None = None          # (nombre, archivo de resultado, función al terminar)
         self._progreso_tarea: QProgressDialog | None = None
+        self._reloj_progreso = QTimer(self)        # lee el avance de las tareas que lo informan
+        self._reloj_progreso.setInterval(400)
+        self._reloj_progreso.timeout.connect(self._leer_progreso_tarea)
+        self._archivo_progreso: Path | None = None
+        self._texto_progreso = ""
         self.redaccion_pendiente = Redaccion()     # zonas marcadas, todavía sin aplicar
         self._comparacion: DialogoComparar | None = None
         self._carpeta_tareas: Path | None = None   # para tareas sin documento abierto
@@ -338,6 +343,10 @@ class VentanaPrincipal(QMainWindow):
             "Importar imágenes como PDF escaneado…", "images", None, self.importar_fotos, grupo=H,
             tip="Fotos de documentos → PDF: recorta el papel, corrige perspectiva e inclinación, mejora el "
                 "contraste y, si querés, reconoce el texto.", corto="Importar fotos")
+        self.acc_convertir_editable = self._accion(
+            "Convertir escaneado a documento editable…", "file-pen", None, self.convertir_editable, grupo=H,
+            tip="Un escaneo (PDF o fotos) → Word (.docx) editable: reconoce el texto, los títulos, las listas, las "
+                "tablas, el encabezado y el pie, y recorta logos, firmas y sellos.", corto="A Word editable")
         self.acc_comprimir = self._accion("Comprimir…", "shrink", None, self.comprimir, grupo=H,
                                           tip="Crea una copia más liviana y muestra el tamaño antes y después.")
         self.acc_comparar = self._accion("Comparar versiones…", "git-compare", "Ctrl+Shift+C", self.comparar_versiones,
@@ -415,8 +424,8 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_numerar):
             paginas.addSeparator() if a is None else paginas.addAction(a)
         herramientas = enc.agregar_pestana("Herramientas")
-        for a in (self.acc_ocr, self.acc_importar_fotos, self.acc_comprimir, self.acc_borrar_metadatos,
-                  self.acc_comparar, None,
+        for a in (self.acc_ocr, self.acc_convertir_editable, self.acc_importar_fotos, self.acc_comprimir,
+                  self.acc_borrar_metadatos, self.acc_comparar, None,
                   self.acc_sustituir, self.acc_chequear, None, self.acc_paleta, self.acc_acerca):
             herramientas.addSeparator() if a is None else herramientas.addAction(a)
         enc.finalizar()
@@ -551,6 +560,35 @@ class VentanaPrincipal(QMainWindow):
         if dialogo.exec() and dialogo.plan is not None and dialogo.plan.operacion is not None:
             return dialogo.plan
         return None
+
+    def _dialogo_origen_conversion(self) -> str | None:
+        from pdf_studio.ui.conversion import DialogoOrigenConversion
+        nombre = self.documento.ruta_original.name if self.documento is not None else None
+        paginas = self.documento.doc.page_count if self.documento is not None else 0
+        dialogo = DialogoOrigenConversion(nombre, paginas, self)
+        return dialogo.origen if dialogo.exec() else None
+
+    def _dialogo_fotos_conversion(self):
+        """(fotos, opciones) o None si se canceló."""
+        from pdf_studio.ui.escaneo import DialogoImportarFotos
+        dialogo = DialogoImportarFotos(None, False, "", self, para_convertir=True)
+        if dialogo.exec() and dialogo.fotos:
+            return list(dialogo.fotos), dialogo.opciones()
+        return None
+
+    def _dialogo_revision(self, rec):
+        """(fuente elegida, exportar también el PDF) o None si se canceló. Las correcciones
+        quedan en `rec`."""
+        from pdf_studio.ui.conversion import DialogoRevision
+        dialogo = DialogoRevision(rec, self)
+        if dialogo.exec():
+            return dialogo.fuente_elegida, dialogo.con_pdf.isChecked()
+        return None
+
+    def _pedir_ruta_docx(self, sugerida: Path) -> str | None:
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar documento de Word", str(sugerida),
+                                              "Documento de Word (*.docx)")
+        return ruta or None
 
     def _dialogo_importar_fotos(self, ocr_disponible: bool, motivo: str):
         """(fotos, opciones, con OCR) o None si se canceló."""
@@ -1302,22 +1340,46 @@ class VentanaPrincipal(QMainWindow):
         return progreso
 
     def iniciar_tarea(self, tarea: str, pedido: dict, titulo: str, texto: str, al_terminar,
-                      carpeta: Path | None = None) -> bool:
+                      carpeta: Path | None = None, con_avance: bool = False) -> bool:
         """Corre una tarea de pdf_studio.procesos sin trabar la interfaz.
-        al_terminar(ok, resultado o mensaje de error)."""
+        al_terminar(ok, resultado o mensaje de error). Con `con_avance`, la tarea informa
+        cuántas páginas lleva y la barra de progreso lo muestra."""
         if self.proceso_tarea.ocupado:
             return False
         if carpeta is None:
             carpeta = self.documento.carpeta_trabajo if self.documento is not None else self._carpeta_sin_documento()
         archivo_pedido, archivo_resultado = carpeta / f"{tarea}_pedido.json", carpeta / f"{tarea}_resultado.json"
         archivo_resultado.unlink(missing_ok=True)
+        self._archivo_progreso = None
+        if con_avance:
+            self._archivo_progreso = carpeta / f"{tarea}_progreso.json"
+            self._archivo_progreso.unlink(missing_ok=True)
+            pedido = {**pedido, "progreso": str(self._archivo_progreso)}
+            self._texto_progreso = texto
         archivo_pedido.write_text(json.dumps(pedido), encoding="utf-8")
         programa, argumentos = procesos.comando(tarea, archivo_pedido, archivo_resultado)
         self._tarea = (tarea, archivo_resultado, al_terminar, self.documento)
         self.proceso_tarea.iniciar(programa, argumentos, procesos.entorno())
         self._progreso_tarea = self._mostrar_progreso(titulo, texto, self.cancelar_tarea)
+        if con_avance:
+            self._reloj_progreso.start()
         self._estado_analisis()
         return True
+
+    def _leer_progreso_tarea(self) -> None:
+        archivo, progreso = self._archivo_progreso, self._progreso_tarea
+        if archivo is None or progreso is None:
+            self._reloj_progreso.stop()
+            return
+        try:
+            datos = json.loads(archivo.read_text(encoding="utf-8"))
+            hechas, total = int(datos["hechas"]), int(datos["total"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if total > 0:
+            progreso.setMaximum(total)
+            progreso.setValue(min(hechas, total))
+            progreso.setLabelText(f"{self._texto_progreso}\nPágina {min(hechas + 1, total)} de {total}")
 
     def _carpeta_sin_documento(self) -> Path:
         import tempfile
@@ -1332,6 +1394,8 @@ class VentanaPrincipal(QMainWindow):
         self._cerrar_progreso_tarea()
 
     def _cerrar_progreso_tarea(self) -> None:
+        self._reloj_progreso.stop()
+        self._archivo_progreso = None
         progreso, self._progreso_tarea = self._progreso_tarea, None
         if progreso is not None:
             progreso.blockSignals(True)
@@ -1625,6 +1689,159 @@ class VentanaPrincipal(QMainWindow):
             texto += "\n\n" + "\n".join(f"• {a}" for a in informe.avisos)
         self._informar("Importar fotos", texto)
         self.abrir(destino)
+
+    # ------------------------------------------------------------------ convertir a editable
+    def convertir_editable(self) -> bool:
+        """Escaneo (PDF o fotos) → documento editable (.docx y, si se pide, PDF con texto real).
+        El reconocimiento corre en otro proceso; después se revisan las palabras dudosas."""
+        import tempfile
+
+        from pdf_studio.core import conversion
+        if self.proceso_tarea.ocupado or self.proceso_ocr.ocupado:
+            return False
+        try:
+            conversion.verificar_dependencias()
+            tesseract, tessdata = conversion.herramientas_ocr()
+        except ErrorDocumento as e:
+            self._informar_error("Convertir a documento editable", e)
+            self.chequear_dependencias(mostrar=True)
+            return False
+        origen = self._dialogo_origen_conversion()
+        if origen is None:
+            return False
+        pedido: dict = {"tesseract": str(tesseract), "tessdata": str(tessdata)}
+        try:
+            if origen == "abierto" and self.documento is not None:
+                entrada = self._preparar_estado_actual()
+                if entrada is None:
+                    return False
+                pedido.update(origen="pdf", ruta=str(entrada), contrasena=self.documento.contrasena)
+                nombre, total = self.documento.ruta_original, self.documento.doc.page_count
+            elif origen == "fotos":
+                eleccion = self._dialogo_fotos_conversion()
+                if eleccion is None:
+                    return False
+                fotos, opciones = eleccion
+                pedido.update(origen="fotos", fotos=[f.a_dict() for f in fotos], opciones=opciones.a_dict())
+                nombre, total = Path(fotos[0].ruta), len(fotos)
+            else:
+                elegido = self._pedir_pdf_escaneado()
+                if elegido is None:
+                    return False
+                ruta, contrasena = elegido
+                pedido.update(origen="pdf", ruta=str(ruta), contrasena=contrasena)
+                nombre, total = ruta, conversion.contar_paginas(ruta, contrasena)
+        except ErrorDocumento as e:
+            self._informar_error("Convertir a documento editable", e)
+            return False
+        if total > conversion.MAXIMO_PAGINAS:
+            self._informar("Convertir a documento editable", f"El documento tiene {total} páginas; se pueden "
+                           f"convertir hasta {conversion.MAXIMO_PAGINAS} por vez. Separalo en partes "
+                           "(Páginas → Separar) y convertí cada una.")
+            return False
+        carpeta = Path(tempfile.mkdtemp(prefix="conversion_", dir=self._carpeta_sin_documento()))
+        pedido["carpeta"] = str(carpeta)
+        entrada_pdf = Path(pedido["ruta"]) if pedido["origen"] == "pdf" else None
+
+        def listo(ok: bool, resultado) -> None:
+            if not ok:
+                self._informar_error("Convertir a documento editable", resultado)
+                return
+            from pdf_studio.core.reconstruccion import Reconstruccion
+            try:
+                rec = Reconstruccion.desde_dict(resultado)
+            except (KeyError, TypeError, ValueError):
+                registro().exception("Resultado de conversión inválido")
+                self._informar("Convertir a documento editable", "La conversión terminó con un resultado "
+                               "inválido.", error=True)
+                return
+            self._revisar_conversion(rec, Path(nombre), entrada_pdf)
+
+        return self.iniciar_tarea("convertir", pedido, "Convertir a documento editable",
+                                  "Reconociendo el texto y la estructura…", listo, carpeta=carpeta, con_avance=True)
+
+    def _pedir_pdf_escaneado(self) -> tuple[Path, str | None] | None:
+        from pdf_studio.core.comparar import abrir
+        ruta = self._pedir_ruta_comparar("Elegir el PDF escaneado")
+        if not ruta:
+            return None
+        ruta = Path(ruta)
+        contrasena, intento = None, 0
+        while True:
+            try:
+                abrir(ruta, contrasena).close()
+                return ruta, contrasena
+            except ErrorDocumento as e:
+                if "contraseña" not in str(e):
+                    self._informar_error("Convertir a documento editable", e)
+                    return None
+                contrasena = self._pedir_contrasena(ruta.name, intento)
+                intento += 1
+                if contrasena is None:
+                    return None
+
+    def _revisar_conversion(self, rec, nombre: Path, entrada: Path | None) -> None:
+        """Revisión de las dudosas y exportación. Nunca se escribe sobre el original."""
+        from pdf_studio.core.exportar_editable import exportar_docx, exportar_pdf
+        eleccion = self._dialogo_revision(rec)
+        if eleccion is None:
+            return
+        fuente, con_pdf = eleccion
+        ruta = self._pedir_ruta_docx(nombre.with_name(f"{nombre.stem}_editable.docx"))
+        if not ruta:
+            return
+        destino = Path(ruta).with_suffix(".docx")
+        destino_pdf = None
+        if con_pdf:
+            ruta_pdf = self._pedir_ruta_guardar(destino.with_name(f"{destino.stem}_texto.pdf"))
+            if not ruta_pdf:
+                return
+            destino_pdf = Path(ruta_pdf).with_suffix(".pdf")
+            originales = {nombre.resolve()} | ({entrada.resolve()} if entrada is not None else set())
+            if self.documento is not None:
+                originales.add(self.documento.ruta_original.resolve())
+            if destino_pdf.resolve() in originales:
+                self._informar("Convertir a documento editable", "El PDF nuevo no puede reemplazar al original: "
+                                                                 "elegí otro nombre.")
+                return
+        avisos: list[str] = []
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                avisos += exportar_docx(rec, destino, fuente.familia if fuente is not None else None)
+                if destino_pdf is not None:
+                    avisos += exportar_pdf(rec, destino_pdf, fuente)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar_error("Convertir a documento editable", e)
+            return
+        except Exception:
+            registro().exception("Falló la exportación del documento editable")
+            self._informar("Convertir a documento editable", "No se pudo exportar el documento (error inesperado; "
+                           "el detalle quedó en el registro).", error=True)
+            return
+        self._conversion_terminada(destino, destino_pdf, avisos)
+
+    def _conversion_terminada(self, destino: Path, destino_pdf: Path | None, avisos: list[str]) -> None:
+        texto = f"Se creó «{destino.name}»"
+        texto += f" y «{destino_pdf.name}»." if destino_pdf is not None else "."
+        if avisos:
+            texto += "\n\nAtención: " + " ".join(avisos)
+        if self._preguntar_abrir_documento(texto, bool(avisos)):
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(destino)))
+        self.statusBar().showMessage(f"Documento editable guardado: {destino}", 8000)
+
+    def _preguntar_abrir_documento(self, texto: str, con_avisos: bool) -> bool:
+        caja = QMessageBox(QMessageBox.Icon.Warning if con_avisos else QMessageBox.Icon.Information,
+                           "Convertir a documento editable", texto, parent=self)
+        abrir_docx = caja.addButton("Abrir el documento", QMessageBox.ButtonRole.AcceptRole)
+        caja.addButton("Cerrar", QMessageBox.ButtonRole.RejectRole)
+        caja.setDefaultButton(abrir_docx)
+        caja.exec()
+        return caja.clickedButton() is abrir_docx
 
     # ------------------------------------------------------------------ OCR
     def reconocer_texto(self) -> bool:

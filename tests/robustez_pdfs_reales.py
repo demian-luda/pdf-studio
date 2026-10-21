@@ -2,7 +2,8 @@
 
 Por cada PDF de la carpeta se corren varias pruebas, cada una sobre una COPIA temporal:
 abrir, analizar fuentes y renderizar; editar texto; OCR (si hay páginas escaneadas); importar
-la foto de una página escaneada; y las que suman las fases siguientes. Cada prueba guarda y
+la foto de una página escaneada; convertir las páginas escaneadas a documento editable
+(.docx y PDF con texto real); y las que suman las fases siguientes. Cada prueba guarda y
 verifica la fidelidad. Los originales nunca se modifican (se verifica su hash al final).
 
 El informe muestra SOLO el nombre del archivo, la prueba, la etapa y el tipo de error:
@@ -40,6 +41,9 @@ CATEGORIAS = [
     ("reutilizar", "la fuente original no se puede reutilizar"),
     ("No se reconoció texto", "el OCR no encontró letras"),
     ("imagen escaneada está dentro", "escaneo dentro de un objeto compartido"),
+    ("letras legibles", "el escaneo no tiene letras legibles"),
+    ("Tesseract", "falta Tesseract"),
+    ("python-docx", "falta python-docx"),
 ]
 
 OK, AVISO, FALLA, OMITIDA = "OK", "OK (aviso)", "FALLA", "—"
@@ -406,6 +410,60 @@ def prueba_importar_foto(documento, tmp: Path) -> tuple[str, str]:
     return OK, f"PDF armado y legible ({papel})"
 
 
+def prueba_convertir(documento, tmp: Path) -> tuple[str, str]:
+    """Las páginas escaneadas (hasta MAX_PAGINAS_OCR) pasan por «Convertir escaneado a documento
+    editable»: reconocimiento y estructura, .docx y PDF con texto real, y la verificación de que
+    los dos tengan todo el texto. Solo se informan cantidades, nunca el contenido."""
+    from pdf_studio.core import conversion, ocr
+    from pdf_studio.core.documento import ErrorDocumento
+    from pdf_studio.core.exportar_editable import exportar_docx, exportar_pdf, texto_docx
+    from pdf_studio.core.reconstruccion import Tipo
+    sin_texto = _etapa("detectar escaneo", lambda: ocr.paginas_sin_texto(documento.doc))
+    if not sin_texto:
+        return OMITIDA, "no hay páginas escaneadas"
+    try:
+        conversion.verificar_dependencias()
+        exe, tessdata = conversion.herramientas_ocr()
+    except ErrorDocumento as e:
+        return OMITIDA, f"no disponible ({_categoria(str(e))})"
+    paginas = sin_texto[:MAX_PAGINAS_OCR]
+    entrada = tmp / "copia.pdf"
+    huella = _hash(entrada)
+    try:
+        rec = conversion.convertir(conversion.paginas_de_pdf(entrada, documento.contrasena, paginas), exe, tessdata,
+                                   tmp / "conversion", len(paginas))
+    except ErrorDocumento as e:
+        return AVISO, f"conversión rechazada con aviso ({_categoria(str(e))})"
+    except Exception as e:
+        raise Fallo("convertir", e) from e
+    if _hash(entrada) != huella:
+        raise Fallo("convertir", AssertionError("se modificó el PDF de entrada"))
+    avisos = _etapa("exportar docx", lambda: exportar_docx(rec, tmp / "editable.docx"))
+    avisos += _etapa("exportar pdf", lambda: exportar_pdf(rec, tmp / "editable.pdf"))
+    _etapa("releer docx", lambda: texto_docx(tmp / "editable.docx"))
+
+    def releer_pdf():
+        import pymupdf
+        with pymupdf.open(tmp / "editable.pdf") as d:
+            if d.page_count != len(paginas):
+                raise AssertionError("cantidad de páginas")
+            for pag in d:
+                pag.get_pixmap(dpi=30)
+    _etapa("releer pdf", releer_pdf)
+    cuenta: dict[str, int] = {}
+    for pag in rec.paginas:
+        for b in pag.bloques:
+            cuenta[b.tipo.value] = cuenta.get(b.tipo.value, 0) + 1
+    marco = sum(1 for pag in rec.paginas if pag.encabezado or pag.pie)
+    resumen = ", ".join(f"{n} {t}" for t, n in sorted(cuenta.items())) or "sin bloques"
+    clase = rec.fuente.clase if rec.fuente else "sin fuente"
+    detalle = (f"{len(paginas)} pág.: {resumen}; encabezado/pie en {marco}; {len(rec.dudosas())} dudosas; "
+               f"fuente {clase}")
+    if avisos:
+        return AVISO, f"exportado, pero la verificación avisó ({len(avisos)}); {detalle}"
+    return OK, f".docx y PDF verificados; {detalle}"
+
+
 PRUEBAS: list[tuple[str, Callable]] = [
     ("abrir", prueba_abrir),
     ("editar texto", prueba_editar_texto),
@@ -417,6 +475,7 @@ PRUEBAS: list[tuple[str, Callable]] = [
     ("formulario", prueba_formulario),
     ("comparar", prueba_comparar),
     ("importar foto", prueba_importar_foto),
+    ("a editable", prueba_convertir),
 ]
 
 
@@ -449,7 +508,7 @@ def main(argv: list[str]) -> int:
     opciones = [a for a in argv[1:] if a.startswith("--")]
     posicionales = [a for a in argv[1:] if not a.startswith("--")]
     carpeta = Path(posicionales[0]) if posicionales else CARPETA_POR_DEFECTO
-    pruebas = [(n, p) for n, p in PRUEBAS if not ("--sin-ocr" in opciones and n == "OCR")]
+    pruebas = [(n, p) for n, p in PRUEBAS if not ("--sin-ocr" in opciones and n in ("OCR", "a editable"))]
     solo = next((o.split("=", 1)[1].split(",") for o in opciones if o.startswith("--solo=")), None)
     if solo:
         pruebas = [(n, p) for n, p in pruebas if n in ("abrir", *solo)]

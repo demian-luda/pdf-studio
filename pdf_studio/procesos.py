@@ -1,7 +1,8 @@
 """Tareas pesadas de MuPDF en un proceso aparte (comprimir, comparar versiones, informe de
-diferencias, importar fotos como PDF escaneado): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta
-de un JSON con el pedido y escribe el resultado en otro JSON. Nunca escribe contenido del
-documento en la salida estándar.
+diferencias, importar fotos como PDF escaneado, convertir un escaneado a documento
+editable): MuPDF no admite hilos y la interfaz no se tiene que trabar. Recibe la ruta de un
+JSON con el pedido y escribe el resultado en otro JSON (y, si el pedido trae "progreso", el
+avance en un tercero). Nunca escribe contenido del documento en la salida estándar.
 
 Uso interno:  python -m pdf_studio.procesos <tarea> <pedido.json> <resultado.json>
               (o PDFStudio.exe --tarea <tarea> <pedido.json> <resultado.json>)
@@ -41,7 +42,41 @@ def _escaneo(pedido: dict) -> dict:
     return crear_pdf(fotos, OpcionesEscaneo.desde_dict(pedido["opciones"]), Path(pedido["destino"])).a_dict()
 
 
-TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe, "escaneo": _escaneo}
+def _avisar_progreso(archivo: str | None):
+    def avisar(hechas: int, total: int) -> None:
+        if not archivo:
+            return
+        destino = Path(archivo)
+        temporal = destino.with_name(destino.name + ".tmp")
+        try:
+            temporal.write_text(json.dumps({"hechas": hechas, "total": total}), encoding="utf-8")
+            temporal.replace(destino)
+        except OSError:
+            pass                    # el avance es solo informativo
+    return avisar
+
+
+def _convertir(pedido: dict) -> dict:
+    from pdf_studio.core import conversion
+    from pdf_studio.core.escaneo import AjusteFoto, OpcionesEscaneo
+    progreso = _avisar_progreso(pedido.get("progreso"))
+    if pedido["origen"] == "fotos":
+        fotos = [AjusteFoto.desde_dict(f) for f in pedido["fotos"]]
+        paginas = conversion.paginas_de_fotos(fotos, OpcionesEscaneo.desde_dict(pedido["opciones"]))
+        total = len(fotos)
+    else:
+        total = conversion.contar_paginas(Path(pedido["ruta"]), pedido.get("contrasena"))
+        if pedido.get("paginas") is not None:
+            total = len(pedido["paginas"])
+        paginas = conversion.paginas_de_pdf(Path(pedido["ruta"]), pedido.get("contrasena"), pedido.get("paginas"))
+    progreso(0, total)
+    rec = conversion.convertir(paginas, Path(pedido["tesseract"]), Path(pedido["tessdata"]), Path(pedido["carpeta"]),
+                               total, progreso)
+    return rec.a_dict()
+
+
+TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe, "escaneo": _escaneo,
+          "convertir": _convertir}
 
 
 def ejecutar(tarea: str, pedido_json: Path, resultado_json: Path) -> int:
