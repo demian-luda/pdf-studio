@@ -77,6 +77,8 @@ PAQUETES = [
                   Importancia.OPCIONAL, "Apache-2.0"),
     PaquetePython("docx", "python-docx", "convertir escaneados a documentos de Word editables (.docx)",
                   Importancia.OPCIONAL, "MIT"),
+    PaquetePython("spylls", "spylls", "marcar palabras mal reconocidas al convertir escaneados (corrector ortográfico)",
+                  Importancia.OPCIONAL, "MPL-2.0"),
 ]
 
 

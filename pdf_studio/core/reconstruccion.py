@@ -50,15 +50,17 @@ class Palabra:
     color: str = "000000"
     revisada: bool = False          # el usuario la confirmó o la corrigió
     trazo: float = 0.0              # grosor medio del trazo en pt (para detectar negritas)
+    sospechosa: bool = False        # no está en el diccionario (ver core/ortografia.py)
 
     @property
     def dudosa(self) -> bool:
-        return self.conf < UMBRAL_DUDOSA and not self.revisada
+        return (self.conf < UMBRAL_DUDOSA or self.sospechosa) and not self.revisada
 
     @classmethod
     def desde_dict(cls, d: dict) -> "Palabra":
         return cls(d["id"], d["texto"], tuple(d["caja"]), float(d["conf"]), bool(d.get("negrita", False)),
-                   d.get("color", "000000"), bool(d.get("revisada", False)), float(d.get("trazo", 0.0)))
+                   d.get("color", "000000"), bool(d.get("revisada", False)), float(d.get("trazo", 0.0)),
+                   bool(d.get("sospechosa", False)))
 
 
 @dataclass
@@ -119,6 +121,7 @@ class Bloque:
     filas: list[float] = field(default_factory=list)       # y de las líneas horizontales (n + 1)
     columnas: list[float] = field(default_factory=list)    # x de las líneas verticales (m + 1)
     celdas: list[Celda] = field(default_factory=list)
+    columnas_sin_borde: list[int] = field(default_factory=list)   # líneas verticales que no se dibujan
     # Imagen
     archivo: str = ""
     clase: str = ""                 # "logo", "firma", "sello", "imagen"
@@ -168,7 +171,8 @@ class Bloque:
                    bool(d.get("salto_antes", False)),
                    tuple(d["caja_fija"]) if d.get("caja_fija") else None,
                    [float(v) for v in d.get("filas", [])], [float(v) for v in d.get("columnas", [])],
-                   [Celda.desde_dict(c) for c in d.get("celdas", [])], d.get("archivo", ""), d.get("clase", ""))
+                   [Celda.desde_dict(c) for c in d.get("celdas", [])],
+                   [int(v) for v in d.get("columnas_sin_borde", [])], d.get("archivo", ""), d.get("clase", ""))
 
 
 @dataclass

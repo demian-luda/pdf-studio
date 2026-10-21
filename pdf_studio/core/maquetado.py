@@ -10,12 +10,13 @@ Son funciones puras (sin imágenes ni OCR) para poder probarlas con datos armado
 from __future__ import annotations
 
 import difflib
+import math
 import re
 import statistics
 from dataclasses import dataclass, field
 
-from pdf_studio.core.reconstruccion import (Alineacion, Bloque, Caja, Celda, Linea, PaginaReconstruida, Palabra,
-                                            Reconstruccion, Tipo, union)
+from pdf_studio.core.reconstruccion import (UMBRAL_DUDOSA, Alineacion, Bloque, Caja, Celda, Linea,
+                                            PaginaReconstruida, Palabra, Reconstruccion, Tipo, union)
 
 # Proporciones de una letra respecto del tamaño de la fuente (Arial/Helvetica; se
 # recalculan con la fuente elegida). La caja de una palabra va de lo más alto a lo más bajo
@@ -46,6 +47,7 @@ class Grilla:
     filas: list[float]                       # y de las líneas horizontales, de arriba a abajo
     columnas: list[float]                    # x de las líneas verticales
     celdas: list[tuple[int, int, int, int]]  # (fila, columna, filas que ocupa, columnas que ocupa)
+    sin_borde: list[int] = field(default_factory=list)   # líneas verticales que no se ven (agregadas)
 
     @property
     def caja(self) -> Caja:
@@ -142,28 +144,87 @@ def linea_de_base(palabras: list[Palabra], tamano: float, factores: dict = FACTO
 
 
 # ---------------------------------------------------------------------- negritas
-def marcar_negritas(lineas: list[Linea]) -> None:
-    """Negrita = trazo bastante más grueso que la mediana del documento, en relación con el
-    tamaño de letra. Después se suaviza por renglón: en las palabras cortas se mide mal."""
-    relacion = {id(p): p.trazo / l.tamano for l in lineas for p in l.palabras
-                if p.trazo > 0 and l.tamano > 0}
-    validas = [relacion[id(p)] for l in lineas for p in l.palabras if id(p) in relacion and len(p.texto) >= 3]
-    if len(validas) < 3:
+def marcar_negritas(lineas: list[Linea], trazo_fuente: tuple[float, float] | None = None) -> None:
+    """Negrita = trazo más grueso que el que corresponde al tamaño de letra del renglón.
+
+    Con `trazo_fuente` = (grosor de la regular, grosor de la negrita) de la fuente elegida,
+    en fracciones del tamaño, se descuenta primero lo que engorda el escaneo (el desenfoque
+    suma lo mismo a todas las letras): trazo medido ≈ grosor × tamaño + exceso. Sin eso, un
+    título grande en regular parecería negrita y una negrita chica, regular.
+
+    Se decide por renglón (en una palabra sola se mide mal) y los textos que se repiten
+    («Firma:» en cada fila de una tabla) comparten la decisión."""
+    medibles = [(p, l) for l in lineas for p in l.palabras if p.trazo > 0 and l.tamano > 0]
+    if len(medibles) < 3:
         return
-    mediana = statistics.median(validas)
-    if mediana <= 0:
-        return
-    for linea in lineas:
-        for p in linea.palabras:
-            p.negrita = relacion.get(id(p), 0.0) >= UMBRAL_NEGRITA * mediana
-        letras = sum(len(p.texto) for p in linea.palabras)
-        en_negrita = sum(len(p.texto) for p in linea.palabras if p.negrita)
-        if letras and en_negrita >= 0.6 * letras:
-            for p in linea.palabras:
-                p.negrita = True
-        elif letras and en_negrita <= 0.3 * letras:
-            for p in linea.palabras:
-                p.negrita = relacion.get(id(p), 0.0) >= (UMBRAL_NEGRITA + 0.2) * mediana and len(p.texto) >= 3
+    if trazo_fuente is not None and trazo_fuente[0] > 0:
+        regular, negrita = trazo_fuente
+        restos = sorted(p.trazo - regular * l.tamano for p, l in medibles if len(p.texto) >= 3)
+        if not restos:
+            return
+        # Con la mayoría del texto en regular, el percentil 30 es el exceso de una regular
+        exceso = max(0.0, restos[int(0.3 * (len(restos) - 1))])
+        relacion = {id(p): (p.trazo - exceso) / (regular * l.tamano) for p, l in medibles}
+        umbral_fijo = math.sqrt(max(negrita, regular * 1.2) / regular)
+    else:
+        crudos = {id(p): p.trazo / l.tamano for p, l in medibles}
+        validas = [crudos[id(p)] for p, _ in medibles if len(p.texto) >= 3]
+        mediana = statistics.median(validas) if len(validas) >= 3 else 0.0
+        if mediana <= 0:
+            return
+        relacion = {k: v / mediana for k, v in crudos.items()}
+        umbral_fijo = UMBRAL_NEGRITA
+
+    def valor_linea(l: Linea) -> float | None:
+        vals = [(relacion[id(p)], len(p.texto)) for p in l.palabras if id(p) in relacion]
+        largas = [v for v, n in vals if n >= 3] or [v for v, _ in vals]
+        return statistics.median(largas) if largas else None
+
+    valores: dict[int, float] = {}
+    por_texto: dict[str, list[float]] = {}
+    for l in lineas:
+        v = valor_linea(l)
+        if v is not None:
+            valores[id(l)] = v
+            por_texto.setdefault(l.texto.strip().lower(), []).append(v)
+    for l in lineas:
+        repetidos = por_texto.get(l.texto.strip().lower(), [])
+        if id(l) in valores and len(repetidos) >= 2:
+            valores[id(l)] = statistics.median(repetidos)
+    umbral = _umbral_negrita([(valores[id(l)], sum(len(p.texto) for p in l.palabras)) for l in lineas
+                              if id(l) in valores], umbral_fijo)
+    for l in lineas:
+        v = valores.get(id(l))
+        en_negrita = v is not None and v >= umbral
+        for p in l.palabras:
+            propia = relacion.get(id(p), 0.0)
+            # Dentro de un renglón regular, una palabra larga claramente más gruesa es negrita
+            p.negrita = en_negrita or (len(p.texto) >= 4 and propia >= umbral + 0.25)
+
+
+def _umbral_negrita(valores: list[tuple[float, int]], umbral_fijo: float) -> float:
+    """El corte que mejor separa los renglones en dos grupos (regular y negrita), pesados por
+    letras; si no hay dos grupos claros, el fijo."""
+    if len(valores) < 4:
+        return umbral_fijo
+    valores = sorted(valores)
+    total = sum(w for _, w in valores) or 1
+    media = sum(v * w for v, w in valores) / total
+    mejor, corte = 0.0, umbral_fijo
+    acumulado, suma = 0, 0.0
+    for i in range(len(valores) - 1):
+        acumulado += valores[i][1]
+        suma += valores[i][0] * valores[i][1]
+        if acumulado == 0 or acumulado == total:
+            continue
+        m0 = suma / acumulado
+        m1 = (media * total - suma) / (total - acumulado)
+        entre = acumulado * (total - acumulado) * (m1 - m0) ** 2
+        candidato = (valores[i][0] + valores[i + 1][0]) / 2
+        # Solo cortes razonables: la negrita es al menos un 10 % más gruesa que la regular
+        if entre > mejor and m1 >= 1.1 * m0 and abs(candidato - umbral_fijo) <= 0.12:
+            mejor, corte = entre, candidato
+    return corte
 
 
 # ---------------------------------------------------------------------- renglones
@@ -314,7 +375,10 @@ def _continua(bloque: Bloque, linea: Linea, col: Columna, cuerpo: float) -> bool
     if titulo_previo != es_tipo_titulo([linea], cuerpo) or previa.negrita != linea.negrita:
         return False
     if _centrada(previa, col) and _centrada(linea, col):
-        return True
+        # Centrados: siguen el párrafo solo si el renglón se cortó porque no entraba la palabra
+        # siguiente («CONTROL / DE / CALIDAD» en una celda son tres renglones a propósito)
+        ancho = previa.caja[2] - previa.caja[0] + 0.3 * t + _ancho_palabra(linea.palabras[0])
+        return ancho > col.ancho - 0.8 * t
     # Sangría: los renglones siguientes arrancan donde arranca el texto del párrafo
     if bloque.tipo == Tipo.ITEM:
         inicio = bloque.lineas[0].caja[0]
@@ -400,8 +464,72 @@ def texto_de(bloque: Bloque) -> str:
 
 
 # ---------------------------------------------------------------------- tablas
+def partir_columnas(grilla: Grilla, palabras: list[PalabraOCR], factores: dict) -> Grilla:
+    """Separa en columnas propias lo que en el escaneo está en la misma celda pero lejos, como
+    una etiqueta y su valor («POE N°:     POE-XX-00-01»): cada valor queda en su celda, en el
+    mismo renglón que su etiqueta, sin espacios ni tabulaciones para ubicarlo. La línea nueva
+    no se dibuja (no estaba en el original).
+
+    El corte tiene que dejar texto a los dos lados en algún renglón y no atravesar ningún texto
+    de esa columna en ninguna fila."""
+    filas, columnas = list(grilla.filas), list(grilla.columnas)
+    celdas, sin_borde = list(grilla.celdas), list(grilla.sin_borde)
+    j = 0
+    while j < len(columnas) - 1:
+        propias = [c for c in celdas if c[1] == j and c[3] == 1]
+        fragmentos = []          # por celda, los renglones armados (cortados en los huecos grandes)
+        for c in propias:
+            caja = (columnas[c[1]], filas[c[0]], columnas[c[1] + 1], filas[c[0] + c[2]])
+            dentro = [po for po in palabras if _centro_en(po.palabra.caja, caja)]
+            fragmentos.append(armar_lineas(dentro, factores) if dentro else [])
+        corte = _corte_vertical(fragmentos)
+        if corte is None:
+            j += 1
+            continue
+        columnas.insert(j + 1, corte)
+        nuevas = []
+        for f, k, nf, nc in celdas:
+            if k == j and nc == 1:
+                nuevas += [(f, j, nf, 1), (f, j + 1, nf, 1)]
+            elif k > j:
+                nuevas.append((f, k + 1, nf, nc))
+            elif k + nc > j:
+                nuevas.append((f, k, nf, nc + 1))
+            else:
+                nuevas.append((f, k, nf, nc))
+        celdas = nuevas
+        sin_borde = [v + 1 if v > j else v for v in sin_borde] + [j + 1]
+        # La columna de la izquierda puede tener otro corte: se vuelve a mirar
+    return Grilla(filas, columnas, sorted(celdas), sorted(sin_borde))
+
+
+def _corte_vertical(por_celda: list[list[Linea]]) -> float | None:
+    izquierdas, derechas = [], []        # fin del texto de la izquierda y comienzo del de la derecha
+    for lineas in por_celda:
+        for a in lineas:
+            for b in lineas:
+                if (b.caja[0] > a.caja[2] and min(a.caja[3], b.caja[3]) - max(a.caja[1], b.caja[1])
+                        > 0.3 * min(a.caja[3] - a.caja[1], b.caja[3] - b.caja[1])):
+                    izquierdas.append(a.caja[2])
+                    derechas.append(b.caja[0])
+    if not izquierdas:
+        return None
+    # El corte va justo antes del valor que empieza más a la izquierda
+    tamano = statistics.median(l.tamano for lineas in por_celda for l in lineas)
+    fin, inicio = max(izquierdas), min(derechas)
+    if inicio - fin < 1.5 * tamano:
+        return None
+    corte = max(fin + 0.5 * tamano, inicio - 0.4 * tamano)
+    for lineas in por_celda:
+        for l in lineas:
+            if l.caja[0] < corte < l.caja[2]:
+                return None
+    return corte
+
+
 def armar_tabla(grilla: Grilla, palabras: list[PalabraOCR], imagenes: list[RegionImagen], vinetas: list[Caja],
                 cuerpo: float, factores: dict) -> Bloque:
+    grilla = partir_columnas(grilla, palabras, factores)
     por_celda = []
     for celda in grilla.celdas:
         caja = grilla.caja_celda(celda)
@@ -422,7 +550,7 @@ def armar_tabla(grilla: Grilla, palabras: list[PalabraOCR], imagenes: list[Regio
         bloques.sort(key=lambda b: b.caja[1])
         celdas.append(Celda(celda[0], celda[1], celda[2], celda[3], bloques))
     return Bloque(Tipo.TABLA, caja_fija=grilla.caja, filas=list(grilla.filas), columnas=list(grilla.columnas),
-                  celdas=celdas)
+                  celdas=celdas, columnas_sin_borde=list(grilla.sin_borde))
 
 
 def _centro_en(caja: Caja, contenedor: Caja) -> bool:
@@ -589,10 +717,12 @@ def maquetar(analisis: list[AnalisisPagina], factores: dict = FACTORES) -> Recon
         todas_las_lineas += lineas + [l for grupo in lineas_tabla for l in grupo]
         por_pagina.append((a, lineas, en_tabla))
 
-    marcar_negritas(todas_las_lineas)
+    marcar_negritas(todas_las_lineas, factores.get("trazo_fuente"))
     con_texto = [l for l in todas_las_lineas if l.palabras]
     pesos = [(l.tamano, sum(len(p.texto) for p in l.palabras)) for l in con_texto]
     cuerpo = _mediana_ponderada(pesos) if pesos else 11.0
+    for l in con_texto:
+        _mayuscula_ambigua(l, cuerpo, factores)
     # La medida de cada renglón varía un poco: lo que está cerca del cuerpo es del cuerpo
     for l in con_texto:
         if abs(l.tamano - cuerpo) <= 0.08 * cuerpo:
@@ -631,6 +761,28 @@ def maquetar(analisis: list[AnalisisPagina], factores: dict = FACTORES) -> Recon
     calcular_espacios(resultado)
     numerar_listas(resultado)
     return resultado
+
+
+_AMBIGUAS = set("cosuvwxz")          # la mayúscula tiene la misma forma que la minúscula
+
+
+def _mayuscula_ambigua(linea: Linea, cuerpo: float, factores: dict) -> None:
+    """«vence:» medido como minúscula da una letra enorme: el OCR confundió la «V» con la «v»
+    (tienen la misma forma). Si con la mayúscula el renglón queda del tamaño del cuerpo, se
+    corrige la letra y la palabra se marca para revisar."""
+    if linea.tamano <= 1.2 * cuerpo or not linea.palabras:
+        return
+    primera = linea.palabras[0]
+    if not primera.texto or primera.texto[0] not in _AMBIGUAS or _clase_palabra(primera.texto) not in ("x", "x+pata"):
+        return
+    corregida = Palabra(primera.id, primera.texto[0].upper() + primera.texto[1:], primera.caja, primera.conf)
+    otras = linea.palabras[1:]
+    tamano = tamano_linea([corregida] + otras, factores)
+    if abs(tamano - cuerpo) <= 0.12 * cuerpo:
+        primera.texto = corregida.texto
+        primera.conf = min(primera.conf, UMBRAL_DUDOSA - 1)
+        linea.tamano = tamano
+        linea.base = linea_de_base(linea.palabras, tamano, factores)
 
 
 def _mediana_ponderada(pesos: list[tuple[float, int]]) -> float:

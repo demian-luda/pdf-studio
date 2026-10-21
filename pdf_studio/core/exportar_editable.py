@@ -382,6 +382,10 @@ class _EscritorDocx:
             celda = tabla.cell(c.fila, c.columna)
             if c.filas > 1 or c.columnas > 1:
                 celda = celda.merge(tabla.cell(c.fila + c.filas - 1, c.columna + c.columnas - 1))
+            ocultos = [lado for lado, linea in (("left", c.columna), ("right", c.columna + c.columnas))
+                       if linea in b.columnas_sin_borde]
+            if ocultos:
+                _ocultar_bordes(celda, ocultos)
             ancho_celda = sum(anchos[c.columna:c.columna + c.columnas]) - 11
             inicial = celda.paragraphs[0]
             for x in c.bloques:
@@ -391,6 +395,28 @@ class _EscritorDocx:
             # Una celda de Word no puede quedar sin párrafo
             if not celda.paragraphs:
                 celda.add_paragraph()
+
+
+def _ocultar_bordes(celda, lados: list[str]) -> None:
+    """Sin borde de ese lado: la separación entre una etiqueta y su valor no estaba dibujada."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    propiedades = celda._tc.get_or_add_tcPr()
+    bordes = propiedades.find(qn("w:tcBorders"))
+    if bordes is None:
+        bordes = OxmlElement("w:tcBorders")
+        # tcBorders va después del ancho y de la combinación, antes del sombreado y la alineación
+        posteriores = [propiedades.find(qn(n)) for n in ("w:shd", "w:noWrap", "w:tcMar", "w:textDirection",
+                                                          "w:tcFitText", "w:vAlign", "w:hideMark")]
+        posteriores = [e for e in posteriores if e is not None]
+        if posteriores:
+            posteriores[0].addprevious(bordes)
+        else:
+            propiedades.append(bordes)
+    for lado in lados:
+        borde = OxmlElement(f"w:{lado}")
+        borde.set(qn("w:val"), "nil")
+        bordes.append(borde)
 
 
 def _ultimo_parrafo(contenedor):
@@ -609,9 +635,14 @@ def _dibujar(pagina, b: Bloque, nombres: tuple[str, str], medidas: tuple) -> Non
     if b.tipo == Tipo.TABLA:
         forma = pagina.new_shape()
         for c in b.celdas:
-            caja = pymupdf.Rect(b.columnas[c.columna], b.filas[c.fila], b.columnas[c.columna + c.columnas],
-                                b.filas[c.fila + c.filas])
-            forma.draw_rect(caja)
+            x0, x1 = b.columnas[c.columna], b.columnas[c.columna + c.columnas]
+            y0, y1 = b.filas[c.fila], b.filas[c.fila + c.filas]
+            forma.draw_line((x0, y0), (x1, y0))
+            forma.draw_line((x0, y1), (x1, y1))
+            if c.columna not in b.columnas_sin_borde:
+                forma.draw_line((x0, y0), (x0, y1))
+            if c.columna + c.columnas not in b.columnas_sin_borde:
+                forma.draw_line((x1, y0), (x1, y1))
         forma.finish(color=(0, 0, 0), width=GROSOR_BORDE)
         forma.commit()
         for c in b.celdas:
@@ -621,7 +652,9 @@ def _dibujar(pagina, b: Bloque, nombres: tuple[str, str], medidas: tuple) -> Non
     if b.marcador and b.lineas:
         primera = b.lineas[0]
         marcador = "•" if not b.numerado else b.marcador
-        pagina.insert_text((b.x_marcador, primera.base), marcador, fontname=nombres[0], fontsize=primera.tamano)
+        # Con un espacio después: si no, al copiar el texto el marcador se pega a la primera palabra
+        pagina.insert_text((b.x_marcador, primera.base), marcador + " ", fontname=nombres[0],
+                           fontsize=primera.tamano)
     for linea in b.lineas:
         for i, p in enumerate(linea.palabras):
             color = tuple(int(p.color[k:k + 2], 16) / 255 for k in (0, 2, 4)) if p.color else (0, 0, 0)

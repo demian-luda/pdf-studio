@@ -1,0 +1,8 @@
+Diccionarios Hunspell para marcar palabras sospechosas al convertir un escaneado.
+
+es_AR: proyecto RLA-ES (https://github.com/sbosio/rla-es), tomado del paquete npm
+       dictionary-es-ar@2.0.0. Licencia: GPL-3.0 o LGPL-3.0 o MPL-1.1 (ver LICENSE-es_AR.txt).
+en_US: SCOWL (http://wordlist.aspell.net), tomado del paquete npm dictionary-en@4.0.0.
+       Licencia: MIT y BSD (ver LICENSE-en_US.txt).
+
+Se leen con spylls (Hunspell en Python puro, licencia MPL-2.0).

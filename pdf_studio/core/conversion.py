@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pdf_studio.core import escaneo
+from pdf_studio.core import escaneo, ortografia
 from pdf_studio.core.documento import ErrorDocumento, Limitacion
 from pdf_studio.core.maquetado import (FACTORES, AnalisisPagina, Grilla, PalabraOCR, RegionImagen, maquetar,
                                        tamano_palabra)
@@ -127,18 +127,40 @@ class _Segmento:
     pos: float          # y (horizontal) o x (vertical) del centro
     a: int              # extremos
     b: int
+    etiqueta: int = 0   # componente conexa (para borrar solo las líneas aceptadas)
 
 
-def _segmentos(mascara: np.ndarray, horizontal: bool) -> list[_Segmento]:
+def _segmentos(mascara: np.ndarray, horizontal: bool) -> tuple[list[_Segmento], np.ndarray]:
     c = escaneo.cv2()
-    n, _, stats, _ = c.connectedComponentsWithStats(mascara, connectivity=8)
+    n, etiquetas, stats, _ = c.connectedComponentsWithStats(mascara, connectivity=8)
     salida = []
     for i in range(1, n):
         x, y, w, h, _ = stats[i]
         if horizontal:
-            salida.append(_Segmento(y + h / 2, x, x + w))
+            salida.append(_Segmento(y + h / 2, x, x + w, i))
         else:
-            salida.append(_Segmento(x + w / 2, y, y + h))
+            salida.append(_Segmento(x + w / 2, y, y + h, i))
+    return salida, etiquetas
+
+
+def _verticales_cortas(corta: np.ndarray, larga: np.ndarray, horiz: np.ndarray, tolerancia: float) -> np.ndarray:
+    """Las verticales cortas (las de una tabla de un solo renglón) que van de una horizontal a
+    otra. Sin esa condición, los trazos de las letras grandes pasarían por líneas."""
+    c = escaneo.cv2()
+    n, etiquetas, stats, _ = c.connectedComponentsWithStats(corta & ~c.dilate(larga, np.ones((3, 3), np.uint8)),
+                                                            connectivity=8)
+    if n <= 1:
+        return larga
+    salida = larga.copy()
+    t = max(4, int(tolerancia) // 3)          # una línea de verdad toca la otra; una letra, no
+    for i in range(1, n):
+        x, y, w, h, _ = stats[i]
+        alto_img = horiz.shape[0]
+        # Arriba y abajo, otra línea (o el borde de la hoja, si la tabla quedó cortada)
+        arriba = y <= 2 * tolerancia or horiz[max(0, y - t):y + t + 1, x:x + w].any()
+        abajo = y + h >= alto_img - 2 * tolerancia or horiz[max(0, y + h - t - 1):y + h + t, x:x + w].any()
+        if arriba and abajo:
+            salida[etiquetas == i] = 255
     return salida
 
 
@@ -147,7 +169,10 @@ def _solo_finas(mascara: np.ndarray, horizontal: bool, grosor: int) -> np.ndarra
     tiene tramos largos de tinta)."""
     c = escaneo.cv2()
     n, etiquetas, stats, _ = c.connectedComponentsWithStats(mascara, connectivity=8)
-    gruesos = stats[:, c.CC_STAT_HEIGHT if horizontal else c.CC_STAT_WIDTH] > grosor
+    # Grosor medio = área / largo (no el alto de la caja: una línea larga apenas inclinada
+    # tiene una caja alta, pero sigue siendo fina)
+    largo = np.maximum(1, stats[:, c.CC_STAT_WIDTH if horizontal else c.CC_STAT_HEIGHT])
+    gruesos = stats[:, c.CC_STAT_AREA] / largo > grosor
     gruesos[0] = False
     if not gruesos.any():
         return mascara
@@ -167,8 +192,12 @@ def _agrupar(segmentos: list[_Segmento], tolerancia: float) -> list[list[_Segmen
 
 
 def _de_borde_a_borde(grupo: list[_Segmento], cruces: list[float], tolerancia: float) -> bool:
-    """La línea empieza y termina sobre (o pasando) alguna de las líneas que la cruzan."""
+    """La línea va de una línea que la cruza a otra (puede pasarse o faltarle un pedazo en
+    las puntas, si quedó cortada). Un trazo recto de una firma, dentro de una celda, no."""
     a, b = min(s.a for s in grupo), max(s.b for s in grupo)
+    tocadas = [c for c in cruces if a - tolerancia <= c <= b + tolerancia]
+    if len(tocadas) >= 2:
+        return True
     return (any(abs(a - c) <= tolerancia or a < cruces[0] for c in cruces)
             and any(abs(b - c) <= tolerancia or b > cruces[-1] for c in cruces))
 
@@ -191,28 +220,31 @@ def detectar_grillas(tinta: np.ndarray) -> tuple[list[Grilla], np.ndarray]:
     c = escaneo.cv2()
     h, w = tinta.shape
     largo_h, largo_v = max(30, w // 30), max(30, h // 45)
+    tolerancia = max(8.0, 0.004 * max(h, w))
     # Un poco de tolerancia a líneas apenas inclinadas o cortadas por el ruido
     horiz = c.morphologyEx(c.dilate(tinta, c.getStructuringElement(c.MORPH_RECT, (1, 3))), c.MORPH_OPEN,
                            c.getStructuringElement(c.MORPH_RECT, (largo_h, 1)))
-    vert = c.morphologyEx(c.dilate(tinta, c.getStructuringElement(c.MORPH_RECT, (3, 1))), c.MORPH_OPEN,
-                          c.getStructuringElement(c.MORPH_RECT, (1, largo_v)))
+    ancha = c.dilate(tinta, c.getStructuringElement(c.MORPH_RECT, (3, 1)))
+    vert = c.morphologyEx(ancha, c.MORPH_OPEN, c.getStructuringElement(c.MORPH_RECT, (1, largo_v)))
     grosor = max(12, int(0.006 * max(h, w)))
     horiz, vert = _solo_finas(horiz, True, grosor), _solo_finas(vert, False, grosor)
+    # Las verticales de una tabla de un solo renglón son cortas (unos 0,2 pulgadas)
+    corta = c.morphologyEx(ancha, c.MORPH_OPEN, c.getStructuringElement(c.MORPH_RECT, (1, max(20, h // 90))))
+    vert = _verticales_cortas(_solo_finas(corta, False, grosor), vert, horiz, tolerancia)
     lineas = c.dilate(horiz | vert, c.getStructuringElement(c.MORPH_RECT, (7, 7)))
     n, _, stats, _ = c.connectedComponentsWithStats(lineas, connectivity=8)
     grillas, mascara = [], np.zeros_like(tinta)
-    tolerancia = max(8.0, 0.004 * max(h, w))
     for i in range(1, n):
         x, y, bw, bh, _ = stats[i]
         if bw < 0.08 * w or bh < 0.015 * h:
             continue
         zona = (slice(max(0, y - 4), y + bh + 4), slice(max(0, x - 4), x + bw + 4))
-        hs = _segmentos(horiz[zona], True)
-        vs = _segmentos(vert[zona], False)
+        hs, etiquetas_h = _segmentos(horiz[zona], True)
+        vs, etiquetas_v = _segmentos(vert[zona], False)
         filas = [g for g in _agrupar(hs, tolerancia) if max(s.b for s in g) - min(s.a for s in g) >= 0.05 * bw]
         cols = [g for g in _agrupar(vs, tolerancia) if max(s.b for s in g) - min(s.a for s in g) >= 0.3 * bh
                 or len(filas) > 2]
-        if len(filas) < 2 or len(cols) < 2:
+        if not filas or not cols or len(filas) + len(cols) < 4:
             continue
         ys = [float(np.mean([s.pos for s in g])) for g in filas]
         xs = [float(np.mean([s.pos for s in g])) for g in cols]
@@ -220,6 +252,10 @@ def detectar_grillas(tinta: np.ndarray) -> tuple[list[Grilla], np.ndarray]:
         borde = max(tolerancia, 2.0 * grosor)
         filas = [g for g in filas if _de_borde_a_borde(g, xs, borde)]
         cols = [g for g in cols if _de_borde_a_borde(g, ys, borde)]
+        # Un borde que no se ve (cortado por el borde de la hoja, muy tenue o tapado por una
+        # sombra) se completa donde terminan juntas las líneas que lo cruzan
+        filas = _completar_bordes(filas, cols, tolerancia, zona[0].stop - zona[0].start)
+        cols = _completar_bordes(cols, filas, tolerancia, zona[1].stop - zona[1].start)
         if len(filas) < 2 or len(cols) < 2:
             continue
         ys = [float(np.mean([s.pos for s in g])) for g in filas]
@@ -233,11 +269,19 @@ def detectar_grillas(tinta: np.ndarray) -> tuple[list[Grilla], np.ndarray]:
                 k = padre[k]
             return k
 
+        verticales = [[_cobertura(cols[k], ys[f], ys[f + 1]) for f in range(nf)] for k in range(1, nc)]
+        horizontales = [[_cobertura(filas[k], xs[col], xs[col + 1]) for col in range(nc)] for k in range(1, nf)]
+        dx, dy = max(0, x - 4), max(0, y - 4)
+        banda, corto = max(3, int(tolerancia * 0.5)), max(8, int(tolerancia * 1.6))
+        rastro_v = [[_rastro(tinta, False, xs[k] + dx, ys[f] + dy, ys[f + 1] + dy, banda, corto) for f in range(nf)]
+                    for k in range(1, nc)]
+        rastro_h = [[_rastro(tinta, True, ys[k] + dy, xs[col] + dx, xs[col + 1] + dx, banda, corto)
+                     for col in range(nc)] for k in range(1, nf)]
         for f in range(nf):
             for col in range(nc):
-                if col + 1 < nc and _cobertura(cols[col + 1], ys[f], ys[f + 1]) < 0.5:
+                if col + 1 < nc and not _hay_borde(verticales, rastro_v, col, f):
                     padre[raiz(f * nc + col)] = raiz(f * nc + col + 1)
-                if f + 1 < nf and _cobertura(filas[f + 1], xs[col], xs[col + 1]) < 0.5:
+                if f + 1 < nf and not _hay_borde(horizontales, rastro_h, f, col):
                     padre[raiz(f * nc + col)] = raiz((f + 1) * nc + col)
         grupos: dict[int, list[tuple[int, int]]] = {}
         for f in range(nf):
@@ -257,9 +301,100 @@ def detectar_grillas(tinta: np.ndarray) -> tuple[list[Grilla], np.ndarray]:
         if len(celdas) == 1 and (caja[2] - caja[0]) * (caja[3] - caja[1]) > 0.6 * w * h:
             continue
         grillas.append(grilla)
-        mascara[zona] |= (horiz[zona] | vert[zona])
+        # Se borran solo las líneas de la tabla (no trazos de letras que parezcan líneas)
+        aceptadas_h = [s.etiqueta for g in filas for s in g if s.etiqueta]
+        aceptadas_v = [s.etiqueta for g in cols for s in g if s.etiqueta]
+        mascara[zona][np.isin(etiquetas_h, aceptadas_h) | np.isin(etiquetas_v, aceptadas_v)] = 255
+        _restos_de_lineas(tinta, mascara, grilla, tolerancia)
     mascara = c.dilate(mascara, c.getStructuringElement(c.MORPH_RECT, (5, 5)))
     return grillas, mascara
+
+
+def _restos_de_lineas(tinta: np.ndarray, mascara: np.ndarray, grilla: Grilla, tolerancia: float) -> None:
+    """Agrega a la máscara los pedazos cortos de las líneas de la tabla (los que quedan entre
+    dos cortes, demasiado cortos para detectarlos solos): si no, parecen manchas al lado del
+    texto. Solo los trazos alargados en la dirección de la línea, no las letras que la tocan."""
+    c = escaneo.cv2()
+    h, w = tinta.shape
+    banda = max(3, int(tolerancia * 0.5))
+    # Más largo que cualquier trazo de una letra (la barra de una «E», el palo de una «R»)
+    largo = max(12, int(tolerancia * 3))
+    x0, x1 = max(0, int(grilla.columnas[0]) - banda), min(w, int(grilla.columnas[-1]) + banda)
+    y0, y1 = max(0, int(grilla.filas[0]) - banda), min(h, int(grilla.filas[-1]) + banda)
+    for y in grilla.filas:
+        a, b = max(0, int(y) - banda), min(h, int(y) + banda + 1)
+        zona = np.ascontiguousarray(tinta[a:b, x0:x1])
+        mascara[a:b, x0:x1] |= c.morphologyEx(zona, c.MORPH_OPEN, c.getStructuringElement(c.MORPH_RECT, (largo, 1)))
+    for x in grilla.columnas:
+        a, b = max(0, int(x) - banda), min(w, int(x) + banda + 1)
+        zona = np.ascontiguousarray(tinta[y0:y1, a:b])
+        mascara[y0:y1, a:b] |= c.morphologyEx(zona, c.MORPH_OPEN,
+                                              c.getStructuringElement(c.MORPH_RECT, (1, int(largo * 1.5))))
+
+
+def _hay_borde(lineas: list[list[float]], rastros: list[list[float]], k: int, i: int) -> bool:
+    """¿Existe el tramo i de la línea interior k? (`lineas[k][i]`: qué fracción del tramo se
+    detectó como línea; `rastros[k][i]`: qué fracción tiene al menos trazos rectos cortos en
+    esa dirección, en la tinta original).
+
+    Sí si se ve en al menos la mitad. Si no, las filas (o columnas) que se repiten con la
+    misma estructura completan una línea cortada o borrada por un reflejo, siempre que quede
+    un rastro de ella: la línea está en casi todos los demás tramos y, en ese mismo lugar,
+    todas las otras líneas paralelas están. Sin ningún rastro, es una celda combinada."""
+    tramos = lineas[k]
+    if tramos[i] >= 0.5:
+        return True
+    if len(tramos) < 3 or max(tramos[i], rastros[k][i]) < 0.08:
+        return False
+    enteros = sum(c >= 0.5 for j, c in enumerate(tramos) if j != i)
+    if enteros < 0.75 * (len(tramos) - 1):
+        return False
+    paralelas = [lineas[m][i] for m in range(len(lineas)) if m != k]
+    return bool(paralelas) and all(c >= 0.5 for c in paralelas)
+
+
+def _rastro(tinta: np.ndarray, horizontal: bool, pos: float, a: float, b: float, banda: int, largo: int) -> float:
+    """Fracción de [a, b] donde hay trazos rectos de al menos `largo` px en la dirección de la
+    línea, cerca de `pos` (los pedazos de una línea cortada; las letras casi no tienen)."""
+    c = escaneo.cv2()
+    a, b = int(max(0, a)), int(b)
+    if b - a < 3:
+        return 0.0
+    if horizontal:
+        zona = tinta[max(0, int(pos) - banda):int(pos) + banda + 1, a:b]
+        kernel = (largo, 1)
+    else:
+        zona = tinta[a:b, max(0, int(pos) - banda):int(pos) + banda + 1]
+        kernel = (1, largo)
+    if zona.size == 0:
+        return 0.0
+    abierta = c.morphologyEx(np.ascontiguousarray(zona), c.MORPH_OPEN, c.getStructuringElement(c.MORPH_RECT, kernel))
+    presente = abierta.any(axis=0 if horizontal else 1)
+    return float(np.count_nonzero(presente)) / max(1, presente.size)
+
+
+def _completar_bordes(paralelas: list[list[_Segmento]], cruzadas: list[list[_Segmento]], tolerancia: float,
+                      zona_h: int) -> list[list[_Segmento]]:
+    """Agrega el primer o el último borde si falta: al menos dos líneas cruzadas siguen más allá
+    de la última paralela y terminan a la misma altura."""
+    if len(cruzadas) < 2 or not paralelas:
+        return paralelas
+    paralelas = list(paralelas)
+    a = min(min(s.a for s in g) for g in cruzadas)
+    b = max(max(s.b for s in g) for g in cruzadas)
+    primera, ultima = paralelas[0][0].pos, paralelas[-1][0].pos
+    largo_minimo = max(4 * tolerancia, 0.02 * zona_h)
+    for fin, adelante in ((ultima, True), (primera, False)):
+        extremos = [max(s.b for s in g) if adelante else min(s.a for s in g) for g in cruzadas]
+        pasan = sorted(e for e in extremos if (e - fin if adelante else fin - e) >= largo_minimo)
+        if len(pasan) < 2 or pasan[-1] - pasan[0] > 3 * tolerancia:
+            continue
+        borde = _Segmento(float(pasan[-1] if adelante else pasan[0]), int(a), int(b))
+        if adelante:
+            paralelas.append([borde])
+        else:
+            paralelas.insert(0, [borde])
+    return paralelas
 
 
 def _sin_lineas_sobrantes(ys: list[float], xs: list[float], celdas: list[tuple[int, int, int, int]]):
@@ -373,6 +508,8 @@ def regiones_no_texto(tinta: np.ndarray, color: np.ndarray, palabras: list[Palab
         relleno = tinta_total / (bw * bh)
         if color_frac > 0.4 and 0.6 <= bw / bh <= 1.6 and relleno < 0.35:
             clase = "sello"
+        elif color_frac > 0.4 and bw / bh >= 1.3 and relleno < 0.25:
+            clase = "firma"                    # con birome azul
         elif color_frac > 0.4:
             clase = "logo"
         elif bw / bh >= 1.3 and relleno < 0.25:
@@ -382,6 +519,107 @@ def regiones_no_texto(tinta: np.ndarray, color: np.ndarray, palabras: list[Palab
         caja = _ajustar_a_celda((x0, y0, x1, y1), grillas)
         regiones.append(_Region(caja, clase, color_frac > 0.4))
     return _unir_regiones(regiones, alto_texto * 0.5), vinetas
+
+
+def _fraccion_dentro(caja, contenedor) -> float:
+    """Qué parte del área de `caja` cae dentro de `contenedor`."""
+    ancho = min(caja[2], contenedor[2]) - max(caja[0], contenedor[0])
+    alto = min(caja[3], contenedor[3]) - max(caja[1], contenedor[1])
+    area = (caja[2] - caja[0]) * (caja[3] - caja[1])
+    return max(0, ancho) * max(0, alto) / area if area > 0 else 0.0
+
+
+def _es_texto(region: _Region, tinta: np.ndarray, palabras: list[PalabraTSV], alto_texto: float,
+              grillas: list[Grilla] = (), bordes: np.ndarray | None = None) -> bool:
+    """Una «imagen» que en realidad es texto legible: conviene el texto, que se puede editar
+    (si quedó mal leído, se marca como dudoso para revisarlo). Pasa con las palabras de baja
+    confianza (no cubiertas por el texto seguro) y con las sombras o manchas que rodean al
+    texto dentro de una tabla."""
+    if region.de_color or region.clase in ("sello", "logo"):
+        return False
+    x0, y0, x1, y1 = region.caja
+    zona = tinta[y0:y1, x0:x1] > 0
+    if bordes is not None:
+        zona &= ~bordes[y0:y1, x0:x1]                  # la sombra del borde no es parte de nada
+    total = int(np.count_nonzero(zona))
+    if total == 0:
+        return True
+    cubierta = np.zeros_like(zona)
+    legibles = seguras = 0
+    for p in palabras:
+        letras = sum(ch.isalnum() for ch in p.texto)
+        if (p.conf >= 30 and letras >= 2 and _fraccion_dentro(p.caja, region.caja) >= 0.5
+                and p.caja[3] - p.caja[1] <= 2.5 * alto_texto):
+            legibles += 1
+            seguras += p.conf >= 85
+            cubierta[max(0, p.caja[1] - y0):max(0, p.caja[3] - y0), max(0, p.caja[0] - x0):max(0, p.caja[2] - x0)] = True
+    if not legibles:
+        return False
+    resto = zona & ~cubierta
+    if np.count_nonzero(resto) <= 0.25 * total:
+        # Una firma puede tener garabatos que el OCR lee como letras: hace falta texto seguro
+        return region.clase != "firma" or seguras >= 1
+    if region.clase == "firma":
+        return False
+    # En una tabla, si lo que rodea al texto legible es una mancha maciza (la sombra del borde
+    # de la hoja), es una mancha; trazos finos (manuscrito) siguen siendo imagen
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if not any(g.caja[0] <= cx <= g.caja[2] and g.caja[1] <= cy <= g.caja[3] for g in grillas):
+        return False
+    ys, xs = np.nonzero(resto)
+    caja_resto = (xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)
+    return np.count_nonzero(resto) >= 0.35 * caja_resto
+
+
+def tinta_en_bordes(tinta: np.ndarray) -> np.ndarray:
+    """La tinta conectada al borde de la hoja: sombras y bordes oscuros del escaneo o de la foto."""
+    c = escaneo.cv2()
+    n, etiquetas = c.connectedComponents(tinta, connectivity=8)
+    if n <= 1:
+        return np.zeros_like(tinta, dtype=bool)
+    tocan = np.unique(np.concatenate([etiquetas[0], etiquetas[-1], etiquetas[:, 0], etiquetas[:, -1]]))
+    tocan = tocan[tocan > 0]
+    return np.isin(etiquetas, tocan)
+
+
+def _releer_region(region: _Region, n: int, gris: np.ndarray, tinta: np.ndarray, bordes: np.ndarray,
+                   palabras: list[PalabraTSV], alto_texto: float, grillas: list[Grilla], dpi: float,
+                   tesseract: Path, tessdata: Path, carpeta: Path) -> list[PalabraTSV] | None:
+    if region.de_color or region.clase in ("sello", "logo"):
+        return None
+    x0, y0, x1, y1 = (int(v) for v in region.caja)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    if not any(g.caja[0] <= cx <= g.caja[2] and g.caja[1] <= cy <= g.caja[3] for g in grillas):
+        return None
+    if not any(p.conf >= 60 and _fraccion_dentro(p.caja, region.caja) >= 0.5 for p in palabras):
+        return None
+    # Las palabras que la región corta por la mitad (o toca) se leen enteras con ella
+    holgura = 0.5 * alto_texto
+    alrededor = (x0 - holgura, y0, x1 + holgura, y1)
+    for p in palabras:
+        if _fraccion_dentro(p.caja, alrededor) > 0.1 and p.caja[3] - p.caja[1] <= 2.5 * alto_texto:
+            x0, y0, x1, y1 = min(x0, p.caja[0]), min(y0, p.caja[1]), max(x1, p.caja[2]), max(y1, p.caja[3])
+    region.caja = (x0, y0, x1, y1)
+    # Margen solo arriba y abajo: a los costados podría entrar un pedazo de la palabra vecina
+    m = max(4, int(0.3 * alto_texto))
+    h, w = gris.shape
+    x0, y0, x1, y1 = max(0, x0 - 2), max(0, y0 - m), min(w, x1 + 2), min(h, y1 + m)
+    recorte = gris[y0:y1, x0:x1].copy()
+    recorte[bordes[y0:y1, x0:x1]] = 255
+    tinta_zona = (tinta[y0:y1, x0:x1] > 0) & ~bordes[y0:y1, x0:x1]
+    total = int(np.count_nonzero(tinta_zona))
+    if total == 0:
+        return None
+    leidas = ocr_tsv(recorte, dpi, tesseract, tessdata, carpeta, psm=6)
+    if not leidas or min(p.conf for p in leidas) < 70:
+        return None
+    cubierta = np.zeros_like(tinta_zona)
+    for p in leidas:
+        cubierta[max(0, p.caja[1] - 2):p.caja[3] + 2, max(0, p.caja[0] - 2):p.caja[2] + 2] = True
+    if np.count_nonzero(tinta_zona & ~cubierta) > 0.2 * total:
+        return None                                   # hay algo más que texto (una firma, un dibujo)
+    return [PalabraTSV(p.texto, (p.caja[0] + x0, p.caja[1] + y0, p.caja[2] + x0, p.caja[3] + y0), p.conf,
+                       (-1 - n, p.linea[1], p.linea[2])) for p in leidas]
 
 
 def _ajustar_a_celda(caja, grillas: list[Grilla]):
@@ -478,11 +716,29 @@ def analizar_pagina(img: np.ndarray, numero: int, ancho_pt: float, alto_pt: floa
     para_ocr = gris.copy()
     para_ocr[lineas > 0] = 255
     tinta_sin_lineas = tinta & ~lineas
+    # Las sombras pegadas al borde de la hoja confunden al OCR con el texto de al lado
+    bordes = tinta_en_bordes(tinta_sin_lineas)
+    para_ocr[bordes] = 255
     palabras_tsv = ocr_tsv(para_ocr, dpi, tesseract, tessdata, carpeta)
 
     seguras = [p.caja[3] - p.caja[1] for p in palabras_tsv if p.conf >= CONF_TEXTO]
     alto_texto = float(np.median(seguras)) if seguras else 0.012 * h
     regiones, vinetas = regiones_no_texto(tinta_sin_lineas, color, palabras_tsv, alto_texto, grillas_px)
+    regiones = [r for r in regiones
+                if not _es_texto(r, tinta_sin_lineas, palabras_tsv, alto_texto, grillas_px, bordes)]
+    # Lo que quedó como imagen dentro de una tabla pero tiene texto: se vuelve a leer solo
+    # (sin la sombra ni lo que lo rodea); si sale legible, va como texto y no como imagen
+    quedan = []
+    for n, r in enumerate(regiones):
+        releidas = _releer_region(r, n, para_ocr, tinta_sin_lineas, bordes, palabras_tsv, alto_texto, grillas_px,
+                                  dpi, tesseract, tessdata, carpeta)
+        if releidas is None:
+            quedan.append(r)
+        else:
+            palabras_tsv = [p for p in palabras_tsv if _fraccion_dentro(p.caja, r.caja) < 0.5] + releidas
+    regiones = quedan
+    # Para medir las palabras (tamaño, negrita), sin la sombra del borde de la hoja
+    tinta_palabras = np.where(bordes, 0, tinta_sin_lineas).astype(np.uint8)
 
     # Imágenes recortadas del escaneo (con un pequeño margen)
     imagenes = []
@@ -496,26 +752,23 @@ def analizar_pagina(img: np.ndarray, numero: int, ancho_pt: float, alto_pt: floa
 
     palabras, muestras = [], []
     for i, p in enumerate(palabras_tsv):
-        cx, cy = (p.caja[0] + p.caja[2]) / 2, (p.caja[1] + p.caja[3]) / 2
-        dentro = next((r for _, r in imagenes if r.caja[0] <= cx <= r.caja[2] and r.caja[1] <= cy <= r.caja[3]),
-                      None)
         alto = p.caja[3] - p.caja[1]
-        if dentro is not None and (p.conf < 85 or dentro.de_color or alto > 2.5 * alto_texto):
-            continue                                   # es parte de la imagen
+        if any(_fraccion_dentro(p.caja, r.caja) >= 0.5 for _, r in imagenes):
+            continue                                   # va en la imagen: no se repite como texto
         if alto > 4 * alto_texto and p.conf < CONF_TEXTO:
             continue                                   # una mancha grande que el OCR leyó como letra
-        ajustada = caja_de_tinta(tinta_sin_lineas, p.caja)
+        ajustada = caja_de_tinta(tinta_palabras, p.caja)
         caja_pt = tuple(round(v * k, 2) for v in ajustada)
         palabra = Palabra(f"p{numero}-{i}", p.texto, caja_pt, round(p.conf, 1),
-                          color=color_palabra(color, tinta_sin_lineas, ajustada))
-        grosor = grosor_trazo(tinta_sin_lineas, ajustada)
+                          color=color_palabra(color, tinta_palabras, ajustada))
+        grosor = grosor_trazo(tinta_palabras, ajustada)
         palabra.trazo = round(grosor * k, 4)
         palabras.append(PalabraOCR(palabra, p.linea))
         tamano = tamano_palabra(palabra)
         if (p.conf >= 90 and len(p.texto) >= 4 and p.texto.isalpha() and len(muestras) < 40
                 and grosor > 0 and tamano):
             x0, y0, x1, y1 = ajustada
-            muestras.append(Muestra(p.texto, tinta_sin_lineas[y0:y1, x0:x1].copy(), palabra.trazo / tamano,
+            muestras.append(Muestra(p.texto, tinta_palabras[y0:y1, x0:x1].copy(), palabra.trazo / tamano,
                                     grosor, 1 / k))
 
     grillas = [Grilla([y * k for y in g.filas], [x * k for x in g.columnas], g.celdas) for g in grillas_px]
@@ -632,6 +885,32 @@ def parecido(fuente: Fuente, muestras: list[Muestra]) -> float:
         iou = np.count_nonzero(ajustado & escaneada) / union_ if union_ else 0.0
         puntajes.append(iou - 1.5 * abs(proporcion))
     return float(np.mean(puntajes)) if puntajes else -math.inf
+
+
+def trazo_de_fuente(fuente: Fuente) -> tuple[float, float] | None:
+    """Grosor medio del trazo de la regular y de la negrita, en fracciones del tamaño de letra
+    (se mide igual que en el escaneo: 2 · área / perímetro)."""
+    import statistics
+
+    from PIL import ImageFont
+
+    def medir(archivo: str, indice: int) -> float | None:
+        try:
+            f = ImageFont.truetype(archivo, 48, index=indice)
+        except OSError:
+            return None
+        valores = []
+        for texto in ("Revisado", "control", "Fecha", "manejo", "Preparado", "temperatura"):
+            r = _render(f, texto)
+            if r is not None:
+                valores.append(grosor_trazo(r, (0, 0, r.shape[1], r.shape[0])) / 48)
+        return statistics.median(valores) if valores else None
+
+    regular = medir(fuente.regular, fuente.indice_regular)
+    negrita = medir(fuente.negrita, fuente.indice_negrita) if fuente.negrita != fuente.regular else None
+    if not regular:
+        return None
+    return regular, negrita or regular * 1.45
 
 
 def medidor_de_fuente(fuente: Fuente):
@@ -817,6 +1096,9 @@ def convertir(paginas, tesseract: Path, tessdata: Path, carpeta: Path, total: in
         if medidor is not None:
             factores["medidor"] = medidor
             factores["exceso"] = estimar_exceso(analisis, medidor)
+        trazo = trazo_de_fuente(fuente)
+        if trazo is not None:
+            factores["trazo_fuente"] = trazo
     rec = maquetar(analisis, factores)
     rec.fuente, rec.alternativas = fuente, alternativas
     if fuente is None:
@@ -825,7 +1107,11 @@ def convertir(paginas, tesseract: Path, tessdata: Path, carpeta: Path, total: in
         rec.avisos.append(f"La fuente más parecida, {fuente.familia}, viene con PDF Studio pero no está "
                           "instalada en Windows: el PDF la lleva incluida, pero Word va a mostrar otra hasta "
                           "que la instales.")
+    try:
+        ortografia.marcar_sospechosas(rec)
+    except ortografia.SinCorrector as e:
+        rec.avisos.append(f"{e} Solo se marcan como dudosas las palabras con baja confianza del OCR.")
     dudosas = len(rec.dudosas())
     if dudosas:
-        rec.avisos.append(f"Hay {dudosas} palabra{'s' if dudosas != 1 else ''} con baja confianza para revisar.")
+        rec.avisos.append(f"Hay {dudosas} palabra{'s' if dudosas != 1 else ''} para revisar (baja confianza o fuera del diccionario).")
     return rec

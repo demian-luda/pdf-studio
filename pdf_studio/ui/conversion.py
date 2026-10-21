@@ -417,6 +417,7 @@ class DialogoRevision(QDialog):
             self.muestra.setPixmap(recorte.scaledToHeight(min(64, max(32, recorte.height() * 2)),
                                                           Qt.TransformationMode.SmoothTransformation))
         self.detalle.setText(f"Confianza del reconocimiento: {palabra.conf:.0f} %"
+                             + (" · no está en el diccionario" if palabra.sospechosa else "")
                              + (" · revisada" if palabra.revisada else ""))
         self.campo.setText(palabra.texto)
         self.campo.selectAll()

@@ -410,6 +410,19 @@ def prueba_importar_foto(documento, tmp: Path) -> tuple[str, str]:
     return OK, f"PDF armado y legible ({papel})"
 
 
+def _pagina_es_imagen(pag) -> bool:
+    """Una imagen ocupa casi toda la página (un escaneo, aunque ya tenga texto de un OCR)."""
+    area = pag.rect.width * pag.rect.height
+    try:
+        for info in pag.get_image_info():
+            x0, y0, x1, y1 = info["bbox"]
+            if area > 0 and (x1 - x0) * (y1 - y0) >= 0.85 * area:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def prueba_convertir(documento, tmp: Path) -> tuple[str, str]:
     """Las páginas escaneadas (hasta MAX_PAGINAS_OCR) pasan por «Convertir escaneado a documento
     editable»: reconocimiento y estructura, .docx y PDF con texto real, y la verificación de que
@@ -418,7 +431,11 @@ def prueba_convertir(documento, tmp: Path) -> tuple[str, str]:
     from pdf_studio.core.documento import ErrorDocumento
     from pdf_studio.core.exportar_editable import exportar_docx, exportar_pdf, texto_docx
     from pdf_studio.core.reconstruccion import Tipo
-    sin_texto = _etapa("detectar escaneo", lambda: ocr.paginas_sin_texto(documento.doc))
+    def escaneadas() -> list[int]:
+        # Sin texto, o una imagen de página entera con la capa invisible de un OCR anterior
+        return sorted(set(ocr.paginas_sin_texto(documento.doc)) |
+                      {i for i in range(documento.doc.page_count) if _pagina_es_imagen(documento.doc[i])})
+    sin_texto = _etapa("detectar escaneo", escaneadas)
     if not sin_texto:
         return OMITIDA, "no hay páginas escaneadas"
     try:
@@ -458,10 +475,46 @@ def prueba_convertir(documento, tmp: Path) -> tuple[str, str]:
     resumen = ", ".join(f"{n} {t}" for t, n in sorted(cuenta.items())) or "sin bloques"
     clase = rec.fuente.clase if rec.fuente else "sin fuente"
     detalle = (f"{len(paginas)} pág.: {resumen}; encabezado/pie en {marco}; {len(rec.dudosas())} dudosas; "
-               f"fuente {clase}")
+               f"fuente {clase}; {estructura_de_tablas(rec)}")
     if avisos:
         return AVISO, f"exportado, pero la verificación avisó ({len(avisos)}); {detalle}"
     return OK, f".docx y PDF verificados; {detalle}"
+
+
+def estructura_de_tablas(rec) -> str:
+    """Métrica de las tablas reconstruidas, sin contenido: filas × columnas de cada una, celdas
+    combinadas, columnas separadas sin borde (etiqueta / valor), qué parte de las celdas tiene
+    texto y cuántas palabras quedaron repetidas debajo de una imagen (tiene que ser 0)."""
+    from pdf_studio.core.reconstruccion import Tipo
+    formas, celdas, con_texto, solapes = [], 0, 0, 0
+    for pag in rec.paginas:
+        bloques = pag.todos()
+        imagenes = [b.caja for b in bloques if b.tipo == Tipo.IMAGEN]
+        for b in bloques:
+            if b.tipo != Tipo.TABLA:
+                continue
+            combinadas = sum(1 for c in b.celdas if c.filas > 1 or c.columnas > 1)
+            extra = ""
+            if combinadas or b.columnas_sin_borde:
+                extra = f" ({combinadas} comb., {len(b.columnas_sin_borde)} sin borde)"
+            formas.append(f"{len(b.filas) - 1}×{len(b.columnas) - 1}{extra}")
+            for c in b.celdas:
+                celdas += 1
+                con_texto += any(x.palabras for x in c.bloques)
+                imagenes += [x.caja for x in c.bloques if x.tipo == Tipo.IMAGEN]
+        for b in bloques:
+            for p in b.palabras:
+                area = max(1e-6, (p.caja[2] - p.caja[0]) * (p.caja[3] - p.caja[1]))
+                for i in imagenes:
+                    ancho = min(p.caja[2], i[2]) - max(p.caja[0], i[0])
+                    alto = min(p.caja[3], i[3]) - max(p.caja[1], i[1])
+                    if ancho > 0 and alto > 0 and ancho * alto / area >= 0.5:
+                        solapes += 1
+                        break
+    if not formas:
+        return "sin tablas"
+    return (f"tablas {', '.join(formas)}; celdas con texto {con_texto}/{celdas}; "
+            f"palabras bajo imágenes {solapes}")
 
 
 PRUEBAS: list[tuple[str, Callable]] = [

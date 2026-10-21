@@ -290,3 +290,173 @@ def escanear(origen: Path, destino: Path, dpi: int = 200, angulo: float = 0.6, r
             nueva = salida.new_page(width=pag.rect.width, height=pag.rect.height)
             nueva.insert_image(nueva.rect, stream=buf.getvalue())
         salida.save(destino, garbage=3, deflate=True)
+
+
+# ---------------------------------------------------------------------- POE con tablas de formulario
+# Réplica de la estructura de un POE viejo (todo inventado): encabezado con una celda
+# combinada en tres filas y etiqueta / valor en la misma celda, una tabla de aprobación,
+# una de actualizaciones de 8 × 4 y una de «Reemplaza a». Casi todo es tabla.
+POE_CODIGO = "POE-CC-99-01"
+POE_ENCABEZADO = [("POE N°:", POE_CODIGO), ("Vigente desde:", "Mayo 2024"), ("Actualizar:", "Mayo 2027")]
+POE_TITULO = "Uso y manejo de los baños termostáticos"
+POE_APROBACION = [("Preparado por:", "ANA GÓMEZ", "Fecha: 14/05/2024", "Firma:"),
+                  ("Verificado por:", "LUIS PÉREZ", "Fecha:", "Firma:"),
+                  ("Aprobado por:", "MARTA DÍAZ", "Fecha:", "Firma:")]
+POE_ACTUALIZACIONES = [("Revisado por:", "Fecha:", "Vence:", "Firma:")] * 8
+POE_REEMPLAZA = [("N° de POE reemplazado:", "N/A", "De fecha:", "N/A")]
+POE_SECCIONES = ["Preparación, Verificación, Aprobación", "Actualizaciones", "Reemplaza a:"]
+
+
+@dataclass
+class EsperadoPOE:
+    """Las tablas que tiene que recuperar la conversión (texto por celda, fila por fila)."""
+    encabezado: list[tuple[str, ...]]           # sin la celda combinada «CONTROL DE CALIDAD»
+    aprobacion: list[tuple[str, ...]] = field(default_factory=lambda: list(POE_APROBACION))
+    actualizaciones: list[tuple[str, ...]] = field(default_factory=lambda: list(POE_ACTUALIZACIONES))
+    reemplaza: list[tuple[str, ...]] = field(default_factory=lambda: list(POE_REEMPLAZA))
+    titulo: str = POE_TITULO
+    secciones: list[str] = field(default_factory=lambda: list(POE_SECCIONES))
+    combinada: str = "CONTROL DE CALIDAD"
+    firmas: int = 1
+
+    def palabras(self) -> list[str]:
+        textos = [self.combinada, self.titulo] + self.secciones
+        for t in (self.encabezado, self.aprobacion, self.actualizaciones, self.reemplaza):
+            textos += [c for fila in t for c in fila]
+        return [p for t in textos for p in t.split()]
+
+
+def crear_poe(destino: Path, cortes: bool = True) -> EsperadoPOE:
+    """`cortes`: algunas líneas de las tablas quedan cortadas o muy tenues, como en un
+    papel gastado o una fotocopia de fotocopia."""
+    doc = pymupdf.open()
+    p = _Pagina(doc.new_page(width=ANCHO, height=ALTO), "helv", "hebo")
+    izq, der = 40.0, ANCHO - 40.0
+    # Logo
+    p.pag.draw_oval(pymupdf.Rect(izq + 8, 30, izq + 110, 62), color=(0.2, 0.3, 0.6), fill=(0.35, 0.5, 0.8))
+    p.pag.draw_rect(pymupdf.Rect(izq + 44, 36, izq + 74, 58), color=(0.55, 0.5, 0.2), fill=(0.7, 0.65, 0.25))
+    p.texto(izq + 10, 80, "laboratorio s.r.l.", 12, negrita=True, color=(0.35, 0.3, 0.15))
+
+    # Encabezado: celda combinada en 3 filas + etiqueta / valor sin línea entre ellos
+    y0, alto = 92.0, 19.0
+    x1 = izq + 200
+    forma = p.pag.new_shape()
+    forma.draw_rect(pymupdf.Rect(izq, y0, der, y0 + 3 * alto))
+    forma.draw_line((x1, y0), (x1, y0 + 3 * alto))
+    for i in (1, 2):
+        forma.draw_line((x1, y0 + i * alto), (der, y0 + i * alto))
+    forma.finish(color=(0, 0, 0), width=0.8)
+    forma.commit()
+    for i, palabra in enumerate(("CONTROL", "DE", "CALIDAD")):
+        t = 12.5
+        p.texto(izq + (200 - p.ancho(palabra, t, True)) / 2, y0 + alto * i + 14.5, palabra, t, negrita=True)
+    for i, (etiqueta, valor) in enumerate(POE_ENCABEZADO):
+        p.texto(x1 + 4, y0 + alto * i + 13.5, etiqueta, 9.5)
+        p.texto(x1 + 130, y0 + alto * i + 13.5, valor, 10, negrita=True)
+
+    # Recuadro del título
+    y = y0 + 3 * alto + 14
+    p.pag.draw_rect(pymupdf.Rect(izq + 2, y, der - 2, y + 34), color=(0, 0, 0), width=0.8)
+    p.texto((ANCHO - p.ancho(POE_TITULO, 12.5, True)) / 2, y + 21.5, POE_TITULO, 12.5, negrita=True)
+
+    def seccion(texto: str, y: float) -> None:
+        p.texto(izq + 6, y, texto, 11, negrita=True)
+
+    def tabla(filas, cortes: list[float], xs_valor: dict[int, float], y: float, alto: float) -> float:
+        """Dibuja la grilla (`cortes`: x de las verticales) y escribe cada fila; las columnas
+        lógicas de `xs_valor` (índice → x) no tienen línea: van dentro de la celda anterior."""
+        forma = p.pag.new_shape()
+        forma.draw_rect(pymupdf.Rect(cortes[0], y, cortes[-1], y + alto * len(filas)))
+        for x in cortes[1:-1]:
+            forma.draw_line((x, y), (x, y + alto * len(filas)))
+        for i in range(1, len(filas)):
+            forma.draw_line((cortes[0], y + alto * i), (cortes[-1], y + alto * i))
+        forma.finish(color=(0, 0, 0), width=0.8)
+        forma.commit()
+        for i, fila in enumerate(filas):
+            base = y + alto * i + 11.5
+            celda = 0
+            for j, texto in enumerate(fila):
+                if j in xs_valor:
+                    x = xs_valor[j]
+                else:
+                    x = cortes[celda] + 4
+                    celda += 1
+                p.texto(x, base, texto, 9.5)
+        return y + alto * len(filas)
+
+    y += 34 + 30
+    seccion(POE_SECCIONES[0], y)
+    ancho = der - izq - 8
+    cortes = [izq + 4, izq + 4 + ancho * 0.45, izq + 4 + ancho * 0.70, der - 4]
+    y_aprob = y + 10
+    y = tabla(POE_APROBACION, cortes, {1: izq + 4 + ancho * 0.205}, y_aprob, 25.0)
+    _firma(p.pag, pymupdf.Rect(cortes[2] + 40, y_aprob + 2, cortes[3] - 20, y_aprob + 24), 2)
+
+    y += 34
+    seccion(POE_SECCIONES[1], y)
+    xs = [izq + 6, izq + 6 + ancho * 0.30, izq + 6 + ancho * 0.50, izq + 6 + ancho * 0.70, der - 6]
+    y_act = y + 12
+    y = tabla(POE_ACTUALIZACIONES, xs, {}, y_act, 24.0)
+    if cortes:
+        blanco = (1, 1, 1)
+        # Una vertical cortada en una fila, una horizontal con dos huecos y el borde de abajo tenue
+        p.pag.draw_rect(pymupdf.Rect(xs[2] - 2, y_act + 24 * 3 + 6, xs[2] + 2, y_act + 24 * 4 - 5), color=None,
+                        fill=blanco)
+        for x0, x1 in ((xs[0] + 12, xs[1] - 12), (xs[3] + 40, xs[3] + 47)):
+            p.pag.draw_rect(pymupdf.Rect(x0, y_act + 24 * 5 - 2, x1, y_act + 24 * 5 + 2), color=None, fill=blanco)
+        p.pag.draw_line((xs[0], y), (xs[-1], y), color=(0.97, 0.97, 0.97), width=1.2)
+        p.pag.draw_line((xs[0], y), (xs[-1], y), color=(0.62, 0.62, 0.62), width=0.5)
+
+    y += 34
+    seccion(POE_SECCIONES[2], y)
+    cortes = [izq + 8, izq + 8 + ancho * 0.56, der - 8]
+    tabla(POE_REEMPLAZA, cortes, {1: izq + 8 + ancho * 0.40, 3: izq + 8 + ancho * 0.80}, y + 12, 18.0)
+    doc.set_metadata({"producer": "pruebas PDF Studio"})
+    doc.save(destino)
+    doc.close()
+    return EsperadoPOE(list(POE_ENCABEZADO))
+
+
+def fotografiar(origen: Path, destino: Path, dpi: int = 220, perspectiva: float = 0.025, curvatura: float = 7.0,
+                reflejo: bool = True, semilla: int = 5, calidad: int = 82) -> None:
+    """Simula la foto de una hoja ya recortada (como la que llega del celular): queda una
+    perspectiva residual (más angosta abajo), una curvatura leve del papel (las líneas
+    horizontales se arquean), un reflejo de luz que aclara una zona, sombra en el borde de
+    abajo, desenfoque, ruido y JPEG."""
+    import cv2
+    from PIL import Image
+
+    rng = np.random.default_rng(semilla)
+    with pymupdf.open(origen) as doc, pymupdf.open() as salida:
+        for pag in doc:
+            pix = pag.get_pixmap(dpi=dpi)
+            img = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3].copy()
+            h, w = img.shape[:2]
+            v, u = np.mgrid[0:h, 0:w].astype(np.float32)
+            # Perspectiva: cada renglón de la foto toma un ancho de papel que crece hacia abajo
+            escala = 1.0 - perspectiva * (v / h)
+            mapa_x = w / 2 + (u - w / 2) / escala
+            # Curvatura: el centro de la hoja baja respecto de los costados, más en el medio
+            mapa_y = v - curvatura * np.sin(np.pi * u / w) * np.sin(np.pi * v / h)
+            img = cv2.remap(img, mapa_x, mapa_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=(245, 245, 245))
+            img = cv2.GaussianBlur(img, (3, 3), 0.8).astype(np.float32)
+            # Papel un poco gris y luz despareja
+            img = img * 0.9 + 12
+            luz = 1.0 - 0.18 * (u / w) * (v / h)
+            img *= luz[:, :, None]
+            if reflejo:
+                cx, cy = 0.68 * w, 0.42 * h
+                brillo = np.exp(-(((u - cx) / (0.16 * w)) ** 2 + ((v - cy) / (0.07 * h)) ** 2))
+                img = img + 95 * brillo[:, :, None] * (1 - img / 300)
+            # Sombra en el borde de abajo
+            sombra = np.clip((v - (h - 0.012 * h)) / (0.012 * h), 0, 1)
+            img = img * (1 - 0.75 * sombra[:, :, None])
+            img += rng.normal(0, 5.0, (h, w, 1)).astype(np.float32)
+            img = np.clip(img, 0, 255).astype(np.uint8)
+            buf = io.BytesIO()
+            Image.fromarray(img).save(buf, "JPEG", quality=calidad)
+            nueva = salida.new_page(width=pag.rect.width, height=pag.rect.height)
+            nueva.insert_image(nueva.rect, stream=buf.getvalue())
+        salida.save(destino, garbage=3, deflate=True)
