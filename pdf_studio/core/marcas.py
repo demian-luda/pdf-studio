@@ -17,7 +17,7 @@ from enum import Enum
 import pymupdf
 from PIL import Image
 
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.pdfutil import independizar_recursos
 from pdf_studio.core.rangos import describir_rango
 
@@ -241,7 +241,7 @@ class NumerarPaginas(Operacion):
         self._zonas = {}
         for i, p in enumerate(self.paginas):
             if p >= doc.page_count:
-                raise ErrorDocumento(f"La página {p + 1} no existe.")
+                raise Limitacion(f"La página {p + 1} no existe.")
             independizar_recursos(doc, p)
             pag = doc[p]
             texto = self.texto_de(i)

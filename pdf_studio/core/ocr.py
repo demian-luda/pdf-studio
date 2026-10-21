@@ -26,7 +26,7 @@ from pathlib import Path
 import pymupdf
 
 from pdf_studio import config
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.pdfutil import independizar_recursos
 
 IDIOMAS = "spa+eng"
@@ -46,6 +46,10 @@ class ModoOCR(str, Enum):
 
 class ErrorOCR(ErrorDocumento):
     """Falta algo para el OCR o el reconocimiento falló (mensaje listo para mostrar)."""
+
+
+class LimitacionOCR(ErrorOCR, Limitacion):
+    """Falta una herramienta o el documento no permite el OCR pedido: no es una falla."""
 
 
 # ---------------------------------------------------------------------- detección
@@ -81,7 +85,7 @@ def carpeta_tessdata(exe: Path) -> Path:
     if not all((usuario / f"{i}.traineddata").is_file() for i in IDIOMAS.split("+")):
         faltan = [i for i in IDIOMAS.split("+")
                   if not (usuario / f"{i}.traineddata").is_file() and not (instalada / f"{i}.traineddata").is_file()]
-        raise ErrorOCR("Faltan los idiomas del OCR (" + ", ".join(faltan) + "). Instalalos desde el panel "
+        raise LimitacionOCR("Faltan los idiomas del OCR (" + ", ".join(faltan) + "). Instalalos desde el panel "
                        "Faltantes (Ver → Ver faltantes).")
     for nombre in ("configs", "tessconfigs"):
         origen, destino = instalada / nombre, usuario / nombre
@@ -99,10 +103,10 @@ def entorno_ocr() -> dict[str, str]:
     Lanza ErrorOCR con un mensaje claro si falta algo."""
     from pdf_studio.dependencias.chequeo import buscar_tesseract, modulo_disponible
     if not modulo_disponible("ocrmypdf"):
-        raise ErrorOCR("Falta el paquete «ocrmypdf». Instalalo desde el panel Faltantes.")
+        raise LimitacionOCR("Falta el paquete «ocrmypdf». Instalalo desde el panel Faltantes.")
     exe = buscar_tesseract()
     if exe is None:
-        raise ErrorOCR("No se encontró Tesseract OCR. Instalalo desde el panel Faltantes "
+        raise LimitacionOCR("No se encontró Tesseract OCR. Instalalo desde el panel Faltantes "
                        "(ahí está el comando de PowerShell listo para copiar).")
     tessdata = carpeta_tessdata(exe)
     entorno = dict(os.environ)
@@ -246,7 +250,7 @@ class AgregarCapaOCR(Operacion):
 
     def __init__(self, capas: dict[int, bytes]):
         if not capas:
-            raise ErrorOCR("No se reconoció texto nuevo en las páginas elegidas (puede que ya tuvieran "
+            raise LimitacionOCR("No se reconoció texto nuevo en las páginas elegidas (puede que ya tuvieran "
                            "texto o que la imagen no tenga letras legibles).")
         self.capas = dict(capas)
 
@@ -300,7 +304,7 @@ class ReconstruirOCR(Operacion):
 
     def __init__(self, capas: dict[int, bytes]):
         if not capas:
-            raise ErrorOCR("No se reconoció texto nuevo en las páginas elegidas (puede que ya tuvieran "
+            raise LimitacionOCR("No se reconoció texto nuevo en las páginas elegidas (puede que ya tuvieran "
                            "texto o que la imagen no tenga letras legibles).")
         self.capas = dict(capas)
 
@@ -340,10 +344,10 @@ class ReconstruirOCR(Operacion):
             if info.get("xref") and abs(pymupdf.Rect(info["bbox"]) & pagina) >= area * FRACCION_FONDO:
                 fondos.add(info["xref"])
         if not fondos:
-            raise ErrorOCR(f"La página {p + 1} no tiene una imagen de fondo para reemplazar.")
+            raise LimitacionOCR(f"La página {p + 1} no tiene una imagen de fondo para reemplazar.")
         directas = {img[0]: img[7] for img in pag.get_images(full=True) if img[9] == 0}
         if not fondos <= set(directas):
-            raise ErrorOCR(f"En la página {p + 1} la imagen escaneada está dentro de un objeto "
+            raise LimitacionOCR(f"En la página {p + 1} la imagen escaneada está dentro de un objeto "
                            "compartido: no se puede reconstruir.")
         vacio = doc.get_new_xref()
         doc.update_object(vacio, "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]>>")

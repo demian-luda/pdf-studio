@@ -152,7 +152,7 @@ def test_despues_de_sustituir_se_puede_editar(copia_pdf, tmp_path, incluidas):
         d.cerrar()
 
 
-def test_xobject_se_omite_y_se_informa(incluidas):
+def test_xobject_tambien_se_reemplaza(incluidas):
     fuente = pymupdf.open()
     fuente.new_page().insert_text((72, 100), "Texto en XObject", fontname="helv")
     doc = pymupdf.open()
@@ -161,8 +161,50 @@ def test_xobject_se_omite_y_se_informa(incluidas):
     doc.new_page().insert_text((72, 100), "Texto normal", fontname="helv")
     cand = candidatas(doc, familia(doc, "helvetica"), incluidas, None)[0]
     plan = planificar_sustitucion(doc, {"helvetica": cand})
-    assert plan.paginas == {1}
-    assert any("XObject" in o for o in plan.omitidos)
+    assert plan.paginas == {0, 1} and not plan.omitidos
+    plan.operacion.aplicar(doc)
+    assert {s["font"] for p in doc for s in p.get_texttrace()} == {"LiberationSans"}
+
+
+def capa_invisible(doc):
+    """Página con texto visible y una capa invisible de OCR (modo 3) en otra fuente."""
+    pag = doc.new_page()
+    pag.insert_text((72, 100), "Texto visible", fontname="helv")
+    pag.insert_text((72, 200), "capa de reconocimiento", fontname="tiro", render_mode=3)
+    return pag
+
+
+def test_texto_invisible_se_excluye_del_reemplazo(incluidas):
+    doc = pymupdf.open()
+    capa_invisible(doc)
+    claves = {f.clave for f in familias_del_documento(doc)}
+    assert claves == {"helvetica"}            # la fuente que solo es invisible no se lista
+    cand = candidatas(doc, familia(doc, "helvetica"), incluidas, None)[0]
+    plan = planificar_sustitucion(doc, {"helvetica": cand, "times": cand})
+    assert plan.reemplazados == 1
+    plan.operacion.aplicar(doc)
+    fuentes = {s["font"]: s["type"] for s in doc[0].get_texttrace()}
+    assert fuentes == {"LiberationSans": 0, "Times-Roman": 3}
+
+
+def test_ajustes_solo_de_lo_que_se_reemplaza(incluidas, monkeypatch):
+    """Si una página no se puede reemplazar, sus líneas no aparecen entre los ajustes."""
+    from pdf_studio.core import sustitucion
+    doc = pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf")
+    carlito = next(c for c in candidatas(doc, familia(doc, "helvetica"), incluidas, None)
+                   if c.familia == "Carlito")
+    original = sustitucion.borrar_texto
+    llamadas = []
+
+    def falla_en_la_primera(d, pno, rects):
+        llamadas.append(pno)
+        if len(llamadas) == 1:        # la prueba en la copia de la página 1
+            raise sustitucion.ErrorDocumento("no se puede")
+        return original(d, pno, rects)
+    monkeypatch.setattr(sustitucion, "borrar_texto", falla_en_la_primera)
+    plan = planificar_sustitucion(doc, {"helvetica": carlito})
+    assert 0 not in plan.paginas and plan.omitidos
+    assert plan.ajustes and all(a.pagina != 0 for a in plan.ajustes)
 
 
 # ---------------------------------------------------------------------- interfaz
@@ -204,3 +246,51 @@ def test_ventana_sustituir_y_deshacer(qtbot, monkeypatch, copia_pdf, tmp_path, i
     v.acc_deshacer.trigger()
     assert "Times-Roman" in {s["font"] for s in v.documento.doc[0].get_texttrace()}
     v.cerrar_documento()
+
+
+def test_dialogo_sin_fragmentos_no_deja_aplicar(qtbot, incluidas, monkeypatch):
+    from pdf_studio.core import sustitucion
+    from pdf_studio.ui.sustitucion import DialogoSustitucion
+
+    def nunca(*_a, **_k):
+        raise sustitucion.ErrorDocumento("no se puede")
+    monkeypatch.setattr(sustitucion, "borrar_texto", nunca)
+    doc = pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf")
+    dialogo = DialogoSustitucion(doc, incluidas, None, preseleccion="helvetica")
+    qtbot.addWidget(dialogo)
+    carlito = [c.familia for c in dialogo.opciones[0]].index("Carlito")
+    dialogo.combos[0].setCurrentIndex(carlito)           # una no compatible: habría ajustes
+    dialogo.generar_previa()
+    assert dialogo.plan.reemplazados == 0
+    assert not dialogo.boton_aplicar.isEnabled()
+    assert dialogo.lista_ajustes.count() == 0             # nada de ajustes de lo que no se reemplaza
+    assert dialogo.resumen.text().startswith("No hay fragmentos para reemplazar")
+
+
+def test_vista_previa_sincronizada(qtbot, incluidas):
+    from pdf_studio.ui.sustitucion import DialogoSustitucion
+    doc = pymupdf.open(DIR_PDFS / "texto_varias_paginas.pdf")
+    dialogo = DialogoSustitucion(doc, incluidas, None, preseleccion="helvetica")
+    qtbot.addWidget(dialogo)
+    dialogo.resize(900, 700)
+    dialogo.show()
+    qtbot.waitExposed(dialogo)
+    carlito = [c.familia for c in dialogo.opciones[0]].index("Carlito")
+    dialogo.combos[0].setCurrentIndex(carlito)
+    dialogo.generar_previa()
+    dialogo.zoom.setCurrentIndex(dialogo.zoom.findData(150))
+    original, nueva = dialogo.vista_original.pixmap(), dialogo.vista_nueva.pixmap()
+    assert original.size() == nueva.size()                # mismo zoom en las dos
+    assert original.width() == pytest.approx(doc[0].rect.width * 1.5, abs=2)
+    a, b = (d.verticalScrollBar() for d in dialogo.desplazables)
+    a.setValue(a.maximum() // 2)
+    assert b.value() == a.value()
+    h_a, h_b = (d.horizontalScrollBar() for d in dialogo.desplazables)
+    h_b.setValue(h_b.maximum())
+    assert h_a.value() == h_b.value()
+    # Clic en un ajuste: las dos vistas muestran esa línea, en la página correcta
+    item = dialogo.lista_ajustes.item(dialogo.lista_ajustes.count() - 1)
+    ajuste = item.data(pytest.importorskip("PySide6.QtCore").Qt.ItemDataRole.UserRole)
+    dialogo._ir_al_ajuste(item)
+    assert dialogo.pagina.value() == ajuste.pagina + 1 and a.value() == b.value()
+    dialogo.close()

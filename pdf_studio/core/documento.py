@@ -30,6 +30,12 @@ class ErrorDocumento(Exception):
     """Error con mensaje listo para mostrar al usuario."""
 
 
+class Limitacion(ErrorDocumento):
+    """Algo que no se puede hacer sin arriesgar la fidelidad o que el documento no permite
+    (una limitación conocida, no una falla): la interfaz lo muestra como información, no
+    con el ícono de error."""
+
+
 class ErrorContrasena(ErrorDocumento):
     pass
 
@@ -368,7 +374,7 @@ class Documento:
         """Copia el archivo preparado al destino elegido por el usuario."""
         destino = Path(destino).resolve()
         if destino == self.ruta_original and not sobrescribir_original:
-            raise ErrorDocumento("Para reemplazar el archivo original usá «Sobrescribir original».")
+            raise Limitacion("Para reemplazar el archivo original usá «Sobrescribir original».")
         temporal = destino.with_name(destino.name + ".pdfstudio-tmp")
         try:
             shutil.copy2(guardado.ruta_temporal, temporal)

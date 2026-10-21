@@ -196,17 +196,67 @@ def test_no_borra_texto_vecino_superpuesto():
         assert {g for g in antes if g[0] == ord("A")} <= despues
 
 
-def test_texto_en_xobject_no_se_edita():
-    fuente = pymupdf.open()
-    fuente.new_page().insert_text((72, 100), "Texto dentro de un formulario XObject", fontname="helv")
+def pdf_con_xobjects(ruta, paginas=2):
+    """Páginas que dibujan dos Form XObject compartidos: uno con dos líneas de texto y otro
+    con un rectángulo y texto (como la capa de un OCR superpuesta con show_pdf_page)."""
+    texto = pymupdf.open()
+    p = texto.new_page()
+    p.insert_text((72, 100), "Texto dentro de un formulario XObject", fontname="helv", fontsize=12)
+    p.insert_text((72, 140), "Segunda línea que no se toca", fontname="helv", fontsize=12)
+    otro = pymupdf.open()
+    p = otro.new_page()
+    p.draw_rect((300, 500, 400, 600), color=(1, 0, 0))
+    p.insert_text((300, 700), "Otro formulario", fontname="helv")
     doc = pymupdf.open()
-    pag = doc.new_page()
-    pag.show_pdf_page(pag.rect, fuente, 0)
-    bloque = bloque_en(pag, 0, pymupdf.Point(100, 96), Nivel.LINEA)
-    assert bloque is not None
-    opcion = analizar_fuente(doc, pag, bloque.estilo, "Otro", None, None).recomendada
-    with pytest.raises(ErrorDocumento, match="XObject"):
-        planificar(doc, bloque, "Otro", opcion).operacion.aplicar(doc)
+    for _ in range(paginas):
+        pag = doc.new_page()
+        pag.show_pdf_page(pag.rect, texto, 0)
+        pag.show_pdf_page(pag.rect, otro, 0)
+    doc.save(ruta)
+    doc.close()
+    return ruta
+
+
+def test_texto_en_xobject_se_edita_con_copia_al_escribir(tmp_path):
+    ruta = pdf_con_xobjects(tmp_path / "xobject.pdf")
+    antes = hash_archivo(ruta)
+    d = Documento(ruta)
+    try:
+        formas = {x[0]: d.doc.xref_stream(x[0]) for x in d.doc[0].get_xobjects()}
+        pix_2 = d.doc[1].get_pixmap().samples
+        _p, nuevo, _o = editar(d, 0, (100, 96), Nivel.LINEA, lambda t: t.replace("dentro", "DENTRO"))
+        texto_1 = texto_plano(d.doc[0])
+        assert "DENTRO" in texto_1 and "Segundalíneaquenosetoca" in texto_1 and "Otroformulario" in texto_1
+        # La otra página, que comparte los XObject, no cambió en nada
+        assert "dentro" in d.doc[1].get_text() and d.doc[1].get_pixmap().samples == pix_2
+        # Los XObject originales siguen intactos; solo se copió el que perdió texto
+        assert all(d.doc.xref_stream(x) == s for x, s in formas.items())
+        usados = {x[0] for x in d.doc[0].get_xobjects()}
+        assert len(usados - set(formas)) == 2         # el formulario editado y su anidado
+        assert len(usados & set(formas)) == 2         # el otro formulario (y su anidado), sin duplicar
+        g = d.guardar(tmp_path / "editado.pdf")
+        assert g.es_fiel and g.incremental, g.resumen()
+        d.deshacer()
+        assert d.doc[0].get_text() == d.doc[1].get_text()
+    finally:
+        d.cerrar()
+    assert hash_archivo(ruta) == antes
+
+
+def test_reemplazo_de_fuente_en_xobject(tmp_path, incluidas):
+    from pdf_studio.core.sustitucion import candidatas, familias_del_documento, planificar_sustitucion
+    ruta = pdf_con_xobjects(tmp_path / "xobject.pdf")
+    d = Documento(ruta)
+    try:
+        familia = familias_del_documento(d.doc)[0]
+        cand = candidatas(d.doc, familia, incluidas, None)[0]
+        plan = planificar_sustitucion(d.doc, {familia.clave: cand})
+        assert plan.reemplazados == 6 and not plan.omitidos
+        d.ejecutar(plan.operacion)
+        assert all("Liberation" in f[3] for p in range(2) for f in d.doc.get_page_fonts(p) if "PDFSr" in f[4])
+        assert d.guardar(tmp_path / "reemplazado.pdf").es_fiel
+    finally:
+        d.cerrar()
 
 
 def test_texto_invisible_sigue_invisible():
@@ -356,3 +406,43 @@ def test_dialogo_muestra_comando_de_fuente_libre(qtbot):
     assert "google/fonts/contents/ofl/roboto" in QGuiApplication.clipboard().text()
     assert not dialogo.boton_instalar.isEnabled()      # sin función de instalación no se ofrece
     assert not dialogo.botones.button(dialogo.botones.StandardButton.Ok).isEnabled()
+
+
+def test_ui_texto_invisible_avisa_sin_error(ventana, tmp_path, qtbot):
+    from pdf_studio.core.texto import AVISO_INVISIBLE
+    from pdf_studio.ui.edicion_texto import DialogoEditarTexto
+    doc = pymupdf.open()
+    pag = doc.new_page()
+    pag.insert_text((72, 100), "capa de ocr invisible", fontname="helv", render_mode=3)
+    doc.save(tmp_path / "ocr.pdf")
+    ventana.abrir(tmp_path / "ocr.pdf")
+    bloque = ventana.seleccionar_texto(0, pymupdf.Point(100, 96))
+    assert bloque is not None and bloque.invisible
+    assert ventana.aviso.isVisible() and ventana.aviso.texto.text() == AVISO_INVISIBLE
+    assert not ventana.aviso.boton.isVisible()            # solo informa: se cierra con la X
+    dialogo = DialogoEditarTexto(bloque, lambda t: ventana._analizar(bloque, t))
+    qtbot.addWidget(dialogo)
+    assert dialogo.aviso_invisible is not None
+    assert dialogo.aviso_invisible.accessibleDescription() == AVISO_INVISIBLE
+
+
+def test_limitaciones_con_icono_de_informacion(ventana, monkeypatch):
+    from pdf_studio.core.documento import Limitacion
+    vistos = []
+    monkeypatch.setattr(ventana, "_informar", lambda t, x, error=False: vistos.append(error))
+    ventana._informar_error("Editar texto", Limitacion("Por ahora solo se puede editar texto horizontal."))
+    ventana._informar_error("Guardar", ErrorDocumento("No se pudo escribir el archivo."))
+    ventana._informar_error("Comprimir", "La tarea terminó sin resultado.")
+    assert vistos == [False, True, True]
+
+
+def test_limitaciones_conocidas_son_limitacion():
+    from pdf_studio.core.documento import Limitacion
+    doc = pymupdf.open()
+    pag = doc.new_page()
+    pag.insert_text((300, 300), "vertical", fontname="helv", rotate=90)
+    pag.insert_text((72, 100), "AAAAA", fontname="helv", fontsize=12)
+    bloque = bloque_en(pag, 0, pymupdf.Point(80, 96), Nivel.LINEA)
+    bloque.lineas[0].glifos[1].y += 3          # simula texto inclinado
+    with pytest.raises(Limitacion):
+        planificar(doc, bloque, "x", None)

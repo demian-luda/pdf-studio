@@ -9,9 +9,10 @@ from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QGroupBo
                                QLabel, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget)
 
 from pdf_studio.core.fuentes import Embebido
-from pdf_studio.core.texto import AnalisisFuente, BloqueTexto, Nivel, OpcionFuente
+from pdf_studio.core.texto import AVISO_INVISIBLE, AnalisisFuente, BloqueTexto, Nivel, OpcionFuente
 from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
 from pdf_studio.ui import iconos
+from pdf_studio.ui.comunes import tarjeta_informativa
 from pdf_studio.ui.tema import marcar_primario
 
 TEXTO_NIVEL = {Nivel.FRAGMENTO: "fragmento", Nivel.LINEA: "línea", Nivel.PARRAFO: "párrafo"}
@@ -38,6 +39,8 @@ class DialogoEditarTexto(QDialog):
 
         self.info = QLabel(self)
         self.info.setWordWrap(True)
+        # Capa de OCR invisible: aviso informativo (no es un error; se puede editar igual)
+        self.aviso_invisible = tarjeta_informativa(AVISO_INVISIBLE, self) if bloque.invisible else None
         self.editor = QPlainTextEdit(bloque.texto, self)
         if bloque.nivel != Nivel.PARRAFO:
             self.editor.setMaximumHeight(90)
@@ -60,6 +63,8 @@ class DialogoEditarTexto(QDialog):
         self.botones.rejected.connect(self.reject)
 
         capa = QVBoxLayout(self)
+        if self.aviso_invisible is not None:
+            capa.addWidget(self.aviso_invisible)
         capa.addWidget(self.info)
         capa.addWidget(QLabel("Texto:", self))
         capa.addWidget(self.editor, 1 if bloque.nivel == Nivel.PARRAFO else 0)
@@ -99,8 +104,8 @@ class DialogoEditarTexto(QDialog):
                   f"<span style='background:{self._color}'>&nbsp;&nbsp;&nbsp;&nbsp;</span>",
                   "<b>En Windows:</b> " + (f"instalada ({instalada.descripcion.split('(')[-1].rstrip(')')})"
                                            if instalada else "no instalada")]
-        if estilo.modo == 3:
-            partes.append("<i>Es texto invisible (capa de OCR): seguirá siendo invisible.</i>")
+        if estilo.modo == 3 and not self.bloque.invisible:
+            partes.append("<i>El comienzo es texto invisible: el texto nuevo también lo será.</i>")
         self.info.setText("<br>".join(partes))
 
         # Opciones de fuente, en orden: original → completa instalada/incluida → instalar → sustituta

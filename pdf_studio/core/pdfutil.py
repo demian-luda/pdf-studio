@@ -127,6 +127,72 @@ def traducir_refs(v, mapa: dict[int, int]):
     return v
 
 
+def valor_de_clave(doc: pymupdf.Document, xref: int, clave: str):
+    """Valor de una clave ya parseado (Ref si es una referencia); None si no está."""
+    tipo, valor = doc.xref_get_key(xref, clave)
+    if tipo == "null":
+        return None
+    if tipo == "xref":
+        return Ref(int(valor.split()[0]))
+    return parsear_objeto(valor)
+
+
+def _objeto(doc: pymupdf.Document, xref: int):
+    try:
+        return parsear_objeto(doc.xref_object(xref, compressed=True))
+    except Exception:
+        return None
+
+
+def emparejar_objetos(doc_a: pymupdf.Document, a, doc_b: pymupdf.Document, b, mapa: dict[int, int]) -> None:
+    """Recorre en paralelo dos estructuras iguales (una página copiada a otro documento y la
+    original) y anota en `mapa` qué objeto de doc_a corresponde a cuál de doc_b."""
+    if isinstance(a, Ref) and isinstance(b, Ref):
+        if int(a) in mapa:
+            return
+        mapa[int(a)] = int(b)
+        a, b = _objeto(doc_a, int(a)), _objeto(doc_b, int(b))
+    # Un lado directo y el otro indirecto (p. ej. una copia con los recursos en línea)
+    elif isinstance(a, Ref) and isinstance(b, (dict, list)):
+        a = _objeto(doc_a, int(a))
+    elif isinstance(b, Ref) and isinstance(a, (dict, list)):
+        b = _objeto(doc_b, int(b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        for clave, va in a.items():
+            if clave != "Parent" and clave in b:
+                emparejar_objetos(doc_a, va, doc_b, b[clave], mapa)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for va, vb in zip(a, b):
+            emparejar_objetos(doc_a, va, doc_b, vb, mapa)
+
+
+def trasplantar(origen: pymupdf.Document, v, destino: pymupdf.Document, mapa: dict[int, int]):
+    """Traduce las referencias de `v` según `mapa`; los objetos de `origen` que no están en
+    el mapa (nuevos) se copian a `destino` como objetos nuevos, con su contenido. Solo se
+    copian formularios y diccionarios: si apareciera una imagen nueva, KeyError (no se
+    re-codifica una imagen)."""
+    if isinstance(v, Ref):
+        x = int(v)
+        if x in mapa:
+            return Ref(mapa[x])
+        obj = _objeto(origen, x)
+        if obj is None or (isinstance(obj, dict) and obj.get("Subtype") == "Image"):
+            raise KeyError(x)
+        nuevo = destino.get_new_xref()
+        mapa[x] = nuevo
+        if isinstance(obj, dict):
+            obj = {k: val for k, val in obj.items() if k not in ("Length", "Filter", "DecodeParms")}
+        destino.update_object(nuevo, serializar_objeto(trasplantar(origen, obj, destino, mapa)))
+        if origen.xref_is_stream(x):
+            destino.update_stream(nuevo, origen.xref_stream(x) or b"")
+        return Ref(nuevo)
+    if isinstance(v, dict):
+        return {k: trasplantar(origen, x, destino, mapa) for k, x in v.items()}
+    if isinstance(v, list):
+        return [trasplantar(origen, x, destino, mapa) for x in v]
+    return v
+
+
 def _copiar_objeto(doc: pymupdf.Document, xref: int) -> int:
     nuevo = doc.get_new_xref()
     doc.update_object(nuevo, doc.xref_object(xref, compressed=True))

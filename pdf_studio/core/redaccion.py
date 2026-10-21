@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.pdfutil import independizar_recursos
 
 NEGRO = (0.0, 0.0, 0.0)
@@ -286,7 +286,7 @@ class Redactar(Operacion):
         self._zonas_afectadas = {}
         for p in sorted(self.redaccion.paginas):
             if p >= doc.page_count:
-                raise ErrorDocumento(f"La página {p + 1} ya no existe: volvé a marcar la redacción.")
+                raise Limitacion(f"La página {p + 1} ya no existe: volvé a marcar la redacción.")
             independizar_recursos(doc, p)
             pag = doc[p]
             zonas = [pymupdf.Rect(r) for r in self.redaccion.zonas.get(p, [])]

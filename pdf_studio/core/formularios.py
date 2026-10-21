@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 
 TIPOS = {
     pymupdf.PDF_WIDGET_TYPE_TEXT: "texto",
@@ -126,7 +126,7 @@ class CompletarFormulario(Operacion):
                 valor = self.valores[w.field_name]
                 tipo = TIPOS.get(w.field_type)
                 if w.field_flags & SOLO_LECTURA:
-                    raise ErrorDocumento(f"El campo «{w.field_name}» es de solo lectura.")
+                    raise Limitacion(f"El campo «{w.field_name}» es de solo lectura.")
                 if tipo == "casilla":
                     w.field_value = w.on_state() if valor else "Off"
                 elif tipo == "radio":
@@ -134,7 +134,7 @@ class CompletarFormulario(Operacion):
                 elif tipo in ("opciones", "lista"):
                     opciones = [str(v) for v in (w.choice_values or [])]
                     if valor not in opciones and not (w.field_flags & (1 << 18)):    # 1<<18 = editable
-                        raise ErrorDocumento(f"«{valor}» no es una opción de «{w.field_name}».")
+                        raise Limitacion(f"«{valor}» no es una opción de «{w.field_name}».")
                     w.field_value = valor
                 elif tipo == "texto":
                     if not str(valor):
@@ -177,7 +177,7 @@ class AplanarFormulario(Operacion):
             for w in pag.widgets() or []:
                 self._zonas.setdefault(pag.number, []).append(tuple(w.rect + (-2, -2, 2, 2)))
         if not self._zonas:
-            raise ErrorDocumento("El documento no tiene campos de formulario.")
+            raise Limitacion("El documento no tiene campos de formulario.")
         doc.bake(annots=False, widgets=True)
 
     def paginas_afectadas(self) -> set[int]:

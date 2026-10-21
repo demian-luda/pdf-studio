@@ -39,12 +39,12 @@ TAREAS = {"comprimir": _comprimir, "comparar": _comparar, "informe": _informe}
 
 
 def ejecutar(tarea: str, pedido_json: Path, resultado_json: Path) -> int:
-    from pdf_studio.core.documento import ErrorDocumento
+    from pdf_studio.core.documento import ErrorDocumento, Limitacion
     try:
         pedido = json.loads(Path(pedido_json).read_text(encoding="utf-8"))
         salida = {"ok": True, "resultado": TAREAS[tarea](pedido)}
     except ErrorDocumento as e:
-        salida = {"ok": False, "error": str(e)}
+        salida = {"ok": False, "error": str(e), "limitacion": isinstance(e, Limitacion)}
     except Exception as e:
         salida = {"ok": False, "error": f"Error inesperado ({type(e).__name__}).",
                   "detalle": traceback.format_exc(limit=8)}

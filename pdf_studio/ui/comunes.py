@@ -34,6 +34,25 @@ def botonera(dialogo: QDialog, texto_ok: str, icono_ok: str | None = None,
     return botones
 
 
+def tarjeta_informativa(texto: str, parent: QWidget | None = None, icono: str = "info") -> QFrame:
+    """Recuadro con ícono de información y un texto: para avisos que no son errores."""
+    tarjeta = QFrame(parent)
+    tarjeta.setObjectName("tarjeta")
+    capa = QHBoxLayout(tarjeta)
+    capa.setContentsMargins(10, 8, 10, 8)
+    simbolo = QLabel(tarjeta)
+    simbolo.setPixmap(iconos.crear_icono(icono).pixmap(18, 18))
+    simbolo.setAlignment(Qt.AlignmentFlag.AlignTop)
+    etiqueta = QLabel(texto, tarjeta)
+    etiqueta.setObjectName("texto_tarjeta")
+    etiqueta.setWordWrap(True)
+    capa.addWidget(simbolo)
+    capa.addWidget(etiqueta, 1)
+    tarjeta.setAccessibleName("Información")
+    tarjeta.setAccessibleDescription(texto)
+    return tarjeta
+
+
 class SelectorPaginas(QGroupBox):
     """Todas / página actual / rango («1-3, 5, 8-fin»), y opciones extra al principio
     (p. ej. «Páginas sin texto»)."""
@@ -120,8 +139,10 @@ class BarraAviso(QFrame):
         self.hide()
 
     def mostrar(self, texto: str, boton: str, icono: str = "info") -> None:
+        """Sin texto de botón, el aviso es solo informativo (se cierra con la X)."""
         self.texto.setText(texto)
         self.boton.setText(boton)
+        self.boton.setVisible(bool(boton))
         lado = 18
         self.icono.setPixmap(iconos.crear_icono(icono).pixmap(lado, lado))
         self.icono.setAlignment(Qt.AlignmentFlag.AlignTop)

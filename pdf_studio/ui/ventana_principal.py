@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog
 from pdf_studio import NOMBRE_APP
 from pdf_studio.config import DIR_RECURSOS
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
-from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado
+from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado, Limitacion
 from pdf_studio.core.fuentes import familia_de, indice_incluidas, indice_sistema
 from pdf_studio.core.ocr import (ErrorOCR, ModoOCR, capas_de_texto, comando_ocrmypdf, crear_operacion,
                                  entorno_ocr, mensaje_de_error_ocrmypdf, paginas_sin_texto, parece_escaneado)
@@ -35,7 +35,8 @@ from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePD
                                      nombres_libres)
 from pdf_studio import procesos
 from pdf_studio.core.sustitucion import PlanSustitucion
-from pdf_studio.core.texto import BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en, planificar
+from pdf_studio.core.texto import (AVISO_INVISIBLE, BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en,
+                                   planificar)
 from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_inicio, faltantes_de_fuentes
 from pdf_studio.dependencias.instalador import Instalacion, instalacion_fuente
 from pdf_studio.ui import iconos
@@ -624,6 +625,10 @@ class VentanaPrincipal(QMainWindow):
     def _informar(self, titulo: str, texto: str, error: bool = False) -> None:
         (QMessageBox.critical if error else QMessageBox.information)(self, titulo, texto)
 
+    def _informar_error(self, titulo: str, e: Exception | str) -> None:
+        """Una limitación conocida se muestra como información; la X roja, solo para fallas reales."""
+        self._informar(titulo, str(e), error=not isinstance(e, Limitacion))
+
     def _preguntar(self, titulo: str, texto: str) -> bool:
         r = QMessageBox.question(self, titulo, texto, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                  QMessageBox.StandardButton.No)
@@ -685,7 +690,7 @@ class VentanaPrincipal(QMainWindow):
                 if contrasena is None:
                     return False
             except ErrorDocumento as e:
-                self._informar("No se pudo abrir", str(e), error=True)
+                self._informar_error("No se pudo abrir", e)
                 return False
         self.documento = documento
         documento.al_cambiar(self._documento_cambio)
@@ -846,7 +851,7 @@ class VentanaPrincipal(QMainWindow):
                 return False
             final = doc.confirmar_guardado(guardado, destino, sobrescribir_original=sobrescribir)
         except ErrorDocumento as e:
-            self._informar("No se pudo guardar", str(e), error=True)
+            self._informar_error("No se pudo guardar", e)
             return False
         self.statusBar().showMessage(f"Guardado: {final}", 8000)
         self._mostrar_guardado(guardado, final)
@@ -984,7 +989,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             self.documento.ejecutar(InsertarImagen(pagina, esquinas, item.datos, item.descripcion))
         except ErrorDocumento as e:
-            self._informar("Insertar", str(e), error=True)
+            self._informar_error("Insertar", e)
             return
         self.statusBar().showMessage(f"Se insertó la {item.descripcion} en la página {pagina + 1}.", 5000)
 
@@ -1008,7 +1013,7 @@ class VentanaPrincipal(QMainWindow):
             finally:
                 QApplication.restoreOverrideCursor()
         except (ErrorDocumento, ValueError) as e:
-            self._informar(titulo, str(e), error=True)
+            self._informar_error(titulo, e)
             return False
         self.statusBar().showMessage(operacion.descripcion() + ": listo (Ctrl+Z para deshacer).", 6000)
         return True
@@ -1019,7 +1024,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             op = EliminarPaginas(self.paginas_objetivo(), self.documento.doc.page_count)
         except (ErrorDocumento, ValueError) as e:
-            self._informar("Eliminar páginas", str(e), error=True)
+            self._informar_error("Eliminar páginas", e)
             return False
         return self._ejecutar("Eliminar páginas", op)
 
@@ -1043,7 +1048,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             op = InsertarDesdePDF(posicion, fuentes)
         except (ErrorDocumento, ValueError) as e:
-            self._informar("Insertar páginas", str(e), error=True)
+            self._informar_error("Insertar páginas", e)
             return False
         if self._ejecutar("Insertar páginas", op):
             self.visor.ir_a_pagina(posicion)
@@ -1102,7 +1107,7 @@ class VentanaPrincipal(QMainWindow):
             resultado = extraer_paginas(self.documento.doc, [paginas], [destino], sobrescribir=True,
                                         proteger=[self.documento.ruta_original])[0]
         except ErrorDocumento as e:
-            self._informar("Extraer páginas", str(e), error=True)
+            self._informar_error("Extraer páginas", e)
             return False
         except OSError as e:
             self._informar("Extraer páginas", f"No se pudo escribir {destino}: {e}", error=True)
@@ -1132,7 +1137,7 @@ class VentanaPrincipal(QMainWindow):
             finally:
                 QApplication.restoreOverrideCursor()
         except ErrorDocumento as e:
-            self._informar("Separar en archivos", str(e), error=True)
+            self._informar_error("Separar en archivos", e)
             return False
         except OSError as e:
             self._informar("Separar en archivos", f"No se pudo escribir en {carpeta}: {e}", error=True)
@@ -1246,7 +1251,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             op = CompletarFormulario(valores)
         except ValueError as e:
-            self._informar("Completar formulario", str(e), error=True)
+            self._informar_error("Completar formulario", e)
             return False
         return self._ejecutar("Completar formulario", op)
 
@@ -1334,7 +1339,8 @@ class VentanaPrincipal(QMainWindow):
         if not datos.get("ok"):
             if datos.get("detalle"):
                 registro().error("Falló la tarea %s: %s", tarea, datos["detalle"])
-            al_terminar(False, datos.get("error", "Error desconocido."))
+            mensaje = datos.get("error", "Error desconocido.")
+            al_terminar(False, Limitacion(mensaje) if datos.get("limitacion") else mensaje)
             return
         al_terminar(True, datos["resultado"])
 
@@ -1349,7 +1355,7 @@ class VentanaPrincipal(QMainWindow):
             finally:
                 QApplication.restoreOverrideCursor()
         except ErrorDocumento as e:
-            self._informar("Preparar el documento", str(e), error=True)
+            self._informar_error("Preparar el documento", e)
             return None
         if not guardado.es_fiel and not self._preguntar_guardar_igual(guardado):
             return None
@@ -1375,7 +1381,7 @@ class VentanaPrincipal(QMainWindow):
 
     def _compresion_lista(self, ok: bool, resultado, salida: Path) -> None:
         if not ok:
-            self._informar("Comprimir", resultado, error=True)
+            self._informar_error("Comprimir", resultado)
             return
         resultado = ResultadoCompresion.desde_dict(resultado)
         if not self._dialogo_resultado_compresion(resultado):
@@ -1388,7 +1394,7 @@ class VentanaPrincipal(QMainWindow):
         destino = Path(ruta).with_suffix(".pdf")
         if destino.resolve() == original:
             self._informar("Comprimir", "Elegiste el archivo original: para no perderlo, la copia comprimida "
-                                        "se guarda con otro nombre.", error=True)
+                                        "se guarda con otro nombre.")
             return
         try:
             temporal = destino.with_name(destino.name + ".pdfstudio-tmp")
@@ -1414,7 +1420,7 @@ class VentanaPrincipal(QMainWindow):
                 return ruta, contrasena
             except ErrorDocumento as e:
                 if "contraseña" not in str(e):
-                    self._informar("Comparar versiones", str(e), error=True)
+                    self._informar_error("Comparar versiones", e)
                     return None
                 contrasena = self._pedir_contrasena(ruta.name, intento)
                 intento += 1
@@ -1446,7 +1452,7 @@ class VentanaPrincipal(QMainWindow):
 
         def listo(ok: bool, resultado) -> None:
             if not ok:
-                self._informar("Comparar versiones", resultado, error=True)
+                self._informar_error("Comparar versiones", resultado)
                 return
             resultado = ResultadoComparacion.desde_dict(resultado)
             self.statusBar().showMessage(resultado.resumen(), 10000)
@@ -1465,14 +1471,14 @@ class VentanaPrincipal(QMainWindow):
         if destino.resolve() in (Path(ruta_a).resolve(), Path(ruta_b).resolve()) or (
                 self.documento is not None and destino.resolve() == self.documento.ruta_original):
             self._informar("Exportar informe", "Elegiste uno de los documentos comparados: el informe se "
-                                               "guarda con otro nombre.", error=True)
+                                               "guarda con otro nombre.")
             return False
         pedido = {"resultado": resultado.a_dict(), "a": str(ruta_a), "b": str(ruta_b), "destino": str(destino),
                   "contrasena_a": contrasena_a, "contrasena_b": contrasena_b}
 
         def listo(ok: bool, datos) -> None:
             if not ok:
-                self._informar("Exportar informe", datos, error=True)
+                self._informar_error("Exportar informe", datos)
                 return
             self._informar("Exportar informe", f"Se guardó el informe de diferencias ({datos['paginas']} "
                                                f"páginas):\n{destino}")
@@ -1492,7 +1498,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             entorno = entorno_ocr()
         except ErrorOCR as e:
-            self._informar("Reconocer texto", str(e), error=True)
+            self._informar_error("Reconocer texto", e)
             self.chequear_dependencias(mostrar=True)
             return False
         carpeta = self.documento.carpeta_trabajo
@@ -1554,7 +1560,7 @@ class VentanaPrincipal(QMainWindow):
             finally:
                 QApplication.restoreOverrideCursor()
         except ErrorDocumento as e:
-            self._informar("Reconocer texto", str(e), error=True)
+            self._informar_error("Reconocer texto", e)
             return
         except Exception as e:
             registro().exception("No se pudo leer el resultado del OCR")
@@ -1584,7 +1590,7 @@ class VentanaPrincipal(QMainWindow):
             finally:
                 QApplication.restoreOverrideCursor()
         except ErrorDocumento as e:
-            self._informar("Reemplazar fuente", str(e), error=True)
+            self._informar_error("Reemplazar fuente", e)
             return False
         detalle = plan.resumen()
         if plan.ajustes:
@@ -1614,6 +1620,8 @@ class VentanaPrincipal(QMainWindow):
             self.statusBar().showMessage("No hay texto editable en ese lugar.", 4000)
             return None
         self.visor.mostrar_seleccion(pagina, bloque.bbox)
+        if bloque.invisible:
+            self.mostrar_aviso(AVISO_INVISIBLE, "", None, "info")
         resumen = bloque.texto if len(bloque.texto) < 60 else bloque.texto[:57] + "…"
         self.statusBar().showMessage(f"Seleccionado: «{resumen}». Doble clic o F2 para editar; "
                                      "arrastrá el marco para moverlo.")
@@ -1652,7 +1660,7 @@ class VentanaPrincipal(QMainWindow):
                 return False
             self.documento.ejecutar(plan.operacion)
         except ErrorDocumento as e:
-            self._informar("Editar texto", str(e), error=True)
+            self._informar_error("Editar texto", e)
             self.visor.recargar()
             return False
         self.bloque = None

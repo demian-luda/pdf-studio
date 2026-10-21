@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.fidelidad import comparar_paginas
 from pdf_studio.core.rangos import describir_rango
 
@@ -58,7 +58,7 @@ class EliminarPaginas(Operacion):
         if not self.paginas:
             raise ValueError("No hay páginas para eliminar.")
         if len(self.paginas) >= total:
-            raise ErrorDocumento("No se pueden eliminar todas las páginas: el PDF tiene que tener al menos una.")
+            raise Limitacion("No se pueden eliminar todas las páginas: el PDF tiene que tener al menos una.")
 
     def aplicar(self, doc: pymupdf.Document) -> None:
         doc.delete_pages(self.paginas)
@@ -85,7 +85,7 @@ class ReordenarPaginas(Operacion):
 
     def aplicar(self, doc: pymupdf.Document) -> None:
         if doc.page_count != len(self.orden):
-            raise ErrorDocumento("La cantidad de páginas cambió: no se puede reordenar.")
+            raise Limitacion("La cantidad de páginas cambió: no se puede reordenar.")
         # Movimientos de a una (move_page) en vez de select(): no se reescribe el árbol entero
         actual = list(range(len(self.orden)))
         for destino, pagina in enumerate(self.orden):
@@ -155,7 +155,7 @@ class FuentePDF:
         fuente = cls(ruta.name, ruta.read_bytes(), paginas, contrasena)
         with fuente.abrir() as d:
             if fuente.paginas is not None and any(p >= d.page_count for p in fuente.paginas):
-                raise ErrorDocumento(f"«{ruta.name}» tiene {d.page_count} páginas.")
+                raise Limitacion(f"«{ruta.name}» tiene {d.page_count} páginas.")
         return fuente
 
     def abrir(self) -> pymupdf.Document:
@@ -231,9 +231,9 @@ def extraer_paginas(doc: pymupdf.Document, grupos: list[list[int]], destinos: li
     protegidos = {Path(p).resolve() for p in proteger or []}
     for destino in destinos:
         if Path(destino).resolve() in protegidos:
-            raise ErrorDocumento(f"«{Path(destino).name}» es el archivo original: elegí otro nombre.")
+            raise Limitacion(f"«{Path(destino).name}» es el archivo original: elegí otro nombre.")
         if Path(destino).exists() and not sobrescribir:
-            raise ErrorDocumento(f"Ya existe «{Path(destino).name}»: elegí otro nombre o carpeta.")
+            raise Limitacion(f"Ya existe «{Path(destino).name}»: elegí otro nombre o carpeta.")
     resultados = []
     for grupo, destino in zip(grupos, destinos):
         nuevo = pymupdf.open()

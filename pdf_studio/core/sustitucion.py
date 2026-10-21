@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.fuentes import (Embebido, FuenteSistema, IndiceFuentesSistema, clase_tipografica,
                                      clasificar_fuente, estilo_de, familia_de, separar_nombre, sin_prefijo)
 from pdf_studio.core.pdfutil import independizar_recursos
@@ -29,6 +29,8 @@ from pdf_studio.core.texto import (F_ITALICA, F_MONO, F_NEGRITA, F_SERIF, Linea,
                                    _clave_glifo, _espaciado, _franja_borrado, borrar_texto, bytes_de_fuente,
                                    codificador_de_tramo, dibujar_con_fuente_original, glifos_de_pagina,
                                    lineas_de_pagina, subconjunto)
+
+MODO_INVISIBLE = 3        # modo de render del texto que no se ve (la capa de un OCR)
 
 UMBRAL_AJUSTE = 0.05      # se informan las líneas con ajuste mayor a ±5%
 
@@ -68,6 +70,8 @@ def familias_del_documento(doc: pymupdf.Document) -> list[FamiliaEnUso]:
         for bloque in lineas_de_pagina(pag):
             for ln in bloque:
                 for tr in ln.tramos:
+                    if tr.modo == MODO_INVISIBLE:
+                        continue        # capa de OCR: no se ve, no se reemplaza
                     clave = familia_de(tr.fuente)
                     f = familias.get(clave)
                     if f is None:
@@ -132,7 +136,8 @@ def _ancho_medio_original(doc: pymupdf.Document, familia: FamiliaEnUso) -> tuple
             for ln in bloque:
                 for tr in ln.tramos:
                     estilo = _estilo_tramo(tr)
-                    if familia_de(tr.fuente) != familia.clave or estilo in encontrados:
+                    if (familia_de(tr.fuente) != familia.clave or estilo in encontrados
+                            or tr.modo == MODO_INVISIBLE):
                         continue
                     cod = codificador_de_tramo(doc, pag, tr)
                     if cod is not None:
@@ -206,6 +211,7 @@ class AjusteLinea:
     pagina: int
     texto: str
     escala: float           # 1.0 = sin ajuste
+    y: float = 0.0          # línea base (coordenadas sin rotar), para ir a la línea
 
     @property
     def porcentaje(self) -> float:
@@ -248,7 +254,7 @@ class SustituirFuentes(Operacion):
             pag = doc[pno]
             despues = glifos_de_pagina(pag)
             if (antes - objetivo) - despues:
-                raise ErrorDocumento(f"En la página {pno + 1} el reemplazo habría borrado otro texto. No se aplicó.")
+                raise Limitacion(f"En la página {pno + 1} el reemplazo habría borrado otro texto. No se aplicó.")
             for estilo in {t.estilo for t in tramos}:
                 xref = pag.insert_font(fontname=f"PDFSr{estilo or 'regular'}", fontbuffer=self.fuentes[estilo])
                 if estilo not in xrefs:
@@ -295,6 +301,11 @@ class PlanSustitucion:
     paginas: set[int]
 
     def resumen(self) -> str:
+        if not self.reemplazados:
+            texto = "No hay fragmentos para reemplazar con las fuentes elegidas."
+            if self.omitidos:
+                texto += f" {len(self.omitidos)} caso(s) no se pueden reemplazar."
+            return texto
         texto = f"Se reemplazarán {self.reemplazados} fragmento(s) en {len(self.paginas)} página(s)."
         if self.ajustes:
             texto += (f" {len(self.ajustes)} línea(s) necesitan un ajuste de ancho mayor a "
@@ -302,7 +313,7 @@ class PlanSustitucion:
         else:
             texto += " Ninguna línea necesita un ajuste de ancho mayor a ±5%."
         if self.omitidos:
-            texto += f" {len(self.omitidos)} fragmento(s) no se pueden reemplazar."
+            texto += f" {len(self.omitidos)} caso(s) no se pueden reemplazar."
         return texto
 
 
@@ -377,7 +388,8 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
             for ln in bloque:
                 for tr in ln.tramos:
                     cand = elecciones.get(familia_de(tr.fuente))
-                    if cand is None or not tr.texto.strip():
+                    # El texto invisible (capa de OCR) no se reemplaza: no cambia el aspecto
+                    if cand is None or not tr.texto.strip() or tr.modo == MODO_INVISIBLE:
                         continue
                     estilo = _estilo_tramo(tr)
                     cara = cand.cara(estilo)
@@ -405,6 +417,7 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
     for pno, lista in tramos_por_pagina.items():
         pag = doc[pno]
         reemplazos = []
+        ajustes_pagina: list[AjusteLinea] = []
         for tr, clave, texto_linea in lista:
             fuente = metricas[clave]
             faltan = [c for c in tr.texto if c.strip() and not fuente.has_glyph(ord(c))]
@@ -415,27 +428,28 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
             visibles = [g for g in tr.glifos if g.c.strip()]
             tokens, escala = posiciones_sustitucion(tr, cod, fuente, ajustar_ancho)
             if abs(escala - 1) > UMBRAL_AJUSTE:
-                ajustes.append(AjusteLinea(pno, texto_linea.strip()[:80], escala))
+                ajustes_pagina.append(AjusteLinea(pno, texto_linea.strip()[:80], escala, tr.glifos[0].y))
             reemplazos.append(TramoReemplazo(
                 rect=tuple(_franja_borrado(Linea([tr]))), zona=_zona_tramo(tr),
                 glifos=tokens, y=tr.glifos[0].y, tamano=tr.tamano,
                 color=tr.color, modo=tr.modo, opacidad=tr.opacidad, escala=escala, estilo=clave,
                 objetivo=[_clave_glifo(g.c, g.x, g.y) for g in visibles if ord(g.c) > 32]))
-            reemplazados += 1
         if not reemplazos:
             continue
-        # Prueba en una copia de la página: el texto dentro de XObjects no se puede reemplazar
+        # Prueba en una copia de la página: si el borrado no se puede hacer, la página se omite
+        # entera (y sus líneas no se cuentan ni se listan entre los ajustes)
         temporal = pymupdf.open()
         temporal.insert_pdf(doc, from_page=pno, to_page=pno)
         try:
             borrar_texto(temporal, 0, [pymupdf.Rect(t.rect) for t in reemplazos])
-        except ErrorDocumento:
-            omitidos.append(f"Página {pno + 1}: el texto está dentro de un objeto compartido (XObject)")
-            reemplazados -= len(reemplazos)
+        except ErrorDocumento as e:
+            omitidos.append(f"Página {pno + 1}: {e}")
             continue
         finally:
             temporal.close()
         por_pagina[pno] = reemplazos
+        reemplazados += len(reemplazos)
+        ajustes += ajustes_pagina
 
     # Un ajuste por línea en el informe (la mayor desviación)
     unicos: dict[tuple[int, str], AjusteLinea] = {}

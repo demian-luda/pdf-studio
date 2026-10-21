@@ -25,14 +25,17 @@ from pathlib import Path
 import pymupdf
 
 from pdf_studio.core.codificacion import CodificadorFuente, construir_codificador
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.fuentes import (Embebido, IndiceFuentesSistema, clase_tipografica, clave_fuente, estilo_de,
                                      familia_de, separar_nombre, sin_prefijo)
 from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
-from pdf_studio.core.pdfutil import (Ref, independizar_recursos, parsear_objeto, serializar_objeto,
-                                     traducir_refs)
+from pdf_studio.core.pdfutil import (Ref, emparejar_objetos, independizar_recursos, parsear_objeto,
+                                     serializar_objeto, trasplantar, valor_de_clave)
 
 FLAGS_EXTRACCION = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_LIGATURES
+
+AVISO_INVISIBLE = ("Este texto es la capa de reconocimiento invisible; lo que ves es la imagen. "
+                   "Editarlo no cambia el aspecto de la página.")
 
 # Bits de "flags" de los spans de MuPDF
 F_ITALICA, F_SERIF, F_MONO, F_NEGRITA = 2, 4, 8, 16
@@ -142,6 +145,11 @@ class BloqueTexto:
     @property
     def es_horizontal(self) -> bool:
         return all(abs(g.y - ln.base_y) < 0.01 for ln in self.lineas for g in ln.glifos)
+
+    @property
+    def invisible(self) -> bool:
+        """Todo el bloque es texto invisible (modo de render 3, p. ej. la capa de un OCR)."""
+        return all(t.modo == 3 for ln in self.lineas for t in ln.tramos)
 
     @property
     def varios_estilos(self) -> bool:
@@ -489,7 +497,7 @@ def _gs_opacidad(doc: pymupdf.Document, pag: pymupdf.Page, opacidad: float) -> s
 def dibujar_con_fuente_original(doc: pymupdf.Document, pag: pymupdf.Page, linea: LineaADibujar) -> None:
     cod = construir_codificador(doc, linea.fuente_xref, usados=set())
     if cod is None:
-        raise ErrorDocumento("No se pudo reutilizar la fuente original.")
+        raise Limitacion("No se pudo reutilizar la fuente original.")
     a_pdf = ~pag.transformation_matrix
     nombre = _nombre_recurso(doc, pag, linea.fuente_xref)
     x0, _ = linea.tokens[0][1], linea.y
@@ -497,7 +505,7 @@ def dibujar_con_fuente_original(doc: pymupdf.Document, pag: pymupdf.Page, linea:
     partes = []
     for i, (tok, x) in enumerate(linea.tokens):
         if tok not in cod.a_codigo:
-            raise ErrorDocumento(f"La fuente original no tiene el carácter «{tok}».")
+            raise Limitacion(f"La fuente original no tiene el carácter «{tok}».")
         partes.append(f"<{cod.codigo(tok).hex()}>")
         if i + 1 < len(linea.tokens):
             natural = cod.avance(tok) / 1000 * linea.tamano * linea.escala_h
@@ -568,6 +576,65 @@ def _recursos(doc: pymupdf.Document, pag: pymupdf.Page) -> dict:
             for k, x in recursos.items()}
 
 
+def _analizar_contenido(datos: bytes) -> tuple[int, list[str]]:
+    """(bytes de texto que dibuja, nombres de los XObject que usa con Do, en orden)."""
+    import pikepdf
+
+    texto, usados = 0, []
+    with pikepdf.Pdf.new() as auxiliar:
+        for ins in pikepdf.parse_content_stream(pikepdf.Stream(auxiliar, datos)):
+            if not isinstance(ins, pikepdf.ContentStreamInstruction):
+                continue
+            op, operandos = str(ins.operator), list(ins.operands)
+            if op in ("Tj", "'", '"') and operandos and isinstance(operandos[-1], pikepdf.String):
+                texto += len(bytes(operandos[-1]))
+            elif op == "TJ" and operandos and isinstance(operandos[0], pikepdf.Array):
+                texto += sum(len(bytes(e)) for e in operandos[0] if isinstance(e, pikepdf.String))
+            elif op == "Do" and operandos:
+                usados.append(str(operandos[0]).lstrip("/"))
+    return texto, usados
+
+
+def _xobjects_de(doc: pymupdf.Document, recursos) -> dict[str, int]:
+    if isinstance(recursos, Ref):
+        recursos = parsear_objeto(doc.xref_object(int(recursos), compressed=True))
+    xobj = recursos.get("XObject") if isinstance(recursos, dict) else None
+    if isinstance(xobj, Ref):
+        xobj = parsear_objeto(doc.xref_object(int(xobj), compressed=True))
+    return {k: int(v) for k, v in xobj.items() if isinstance(v, Ref)} if isinstance(xobj, dict) else {}
+
+
+def _formas_sin_cambios(doc: pymupdf.Document, viejo: tuple[bytes, dict], nuevo: tuple[bytes, dict],
+                        iguales: dict[int, int], vistos: set) -> bool:
+    """Empareja los Form XObject que dibujaba el contenido viejo con los que dibuja el nuevo
+    (el filtro de MuPDF los reescribe a todos, en el mismo orden) y anota en `iguales`
+    {nuevo: viejo} los que no perdieron texto. Devuelve True si este contenido no cambió."""
+    texto_v, usados_v = _analizar_contenido(viejo[0])
+    texto_n, usados_n = _analizar_contenido(nuevo[0])
+    igual = texto_v == texto_n
+    if len(usados_v) != len(usados_n):
+        return False
+    for nombre_v, nombre_n in zip(usados_v, usados_n):
+        xv, xn = viejo[1].get(nombre_v), nuevo[1].get(nombre_n)
+        if xv is None or xn is None:
+            igual = False
+            continue
+        if xv == xn or (xv, xn) in vistos:
+            continue
+        vistos.add((xv, xn))
+        formas = all(doc.xref_get_key(x, "Subtype")[1] == "/Form" for x in (xv, xn))
+        if not formas:
+            igual = False      # una imagen reemplazada: no debería pasar (images=NONE)
+            continue
+        if _formas_sin_cambios(doc, (doc.xref_stream(xv) or b"", _xobjects_de(doc, valor_de_clave(doc, xv, "Resources"))),
+                               (doc.xref_stream(xn) or b"", _xobjects_de(doc, valor_de_clave(doc, xn, "Resources"))),
+                               iguales, vistos):
+            iguales[xn] = xv
+        else:
+            igual = False
+    return igual
+
+
 def borrar_texto(doc: pymupdf.Document, pagina: int, rects: list[pymupdf.Rect]) -> None:
     """Borra el texto de las zonas sin tocar imágenes ni gráficos.
 
@@ -576,40 +643,53 @@ def borrar_texto(doc: pymupdf.Document, pagina: int, rects: list[pymupdf.Rect]) 
     "redactado" por MuPDF y se puede seguir guardando en modo incremental (lo que
     exige el principio 2). El filtro de MuPDF reescribe los recursos de la página
     (renombra imágenes, quita fuentes que ya no se usan): cada referencia se
-    traduce al objeto original equivalente. Si el filtro tuvo que crear objetos
-    nuevos (texto dentro de un XObject), no se edita, para no tocar otras partes.
+    traduce al objeto original equivalente.
+
+    Texto dentro de un Form XObject (p. ej. la capa de un OCR): copia al escribir. El
+    XObject que perdió texto se copia como objeto NUEVO que usa solo esta página; el
+    original queda intacto para las demás páginas que lo dibujan. Los XObject que no
+    cambiaron siguen apuntando al objeto original (no se duplican).
     """
+    from pdf_studio.core.redaccion import separar_tj
+
     pag = doc[pagina]
     temporal = pymupdf.open()
     try:
         temporal.insert_pdf(doc, from_page=pagina, to_page=pagina)
+        # Sin TJ, para esquivar el error de MuPDF que corre las letras que siguen a lo borrado
+        separar_tj(temporal, 0)
         pag_t = temporal[0]
-        antes_t, antes_r = _recursos(temporal, pag_t), _recursos(doc, pag)
         mapa: dict[int, int] = {}
-        for categoria, sub in antes_t.items():
-            real = antes_r.get(categoria)
-            if isinstance(sub, dict) and isinstance(real, dict):
-                for nombre, valor in sub.items():
-                    if isinstance(valor, Ref) and isinstance(real.get(nombre), Ref):
-                        mapa[int(valor)] = int(real[nombre])
+        emparejar_objetos(temporal, valor_de_clave(temporal, pag_t.xref, "Resources"),
+                          doc, valor_de_clave(doc, pag.xref, "Resources"), mapa)
+        viejo = (pag_t.read_contents(), _xobjects_de(temporal, valor_de_clave(temporal, pag_t.xref, "Resources")))
         for r in rects:
             pag_t.add_redact_annot(r, fill=False, cross_out=False)
         pag_t.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                                text=pymupdf.PDF_REDACT_TEXT_REMOVE)
-        try:
-            recursos_nuevos = traducir_refs(_recursos(temporal, pag_t), mapa)
-        except KeyError:
-            raise ErrorDocumento("Este texto está dentro de un objeto compartido del PDF (XObject); "
-                                 "por ahora no se puede editar sin arriesgar otras partes del documento.")
+        recursos_t = valor_de_clave(temporal, pag_t.xref, "Resources")
         contenido = pag_t.read_contents()
+        iguales: dict[int, int] = {}
+        _formas_sin_cambios(temporal, viejo, (contenido, _xobjects_de(temporal, recursos_t)), iguales, set())
+        for nuevo, original in iguales.items():
+            if original in mapa:
+                mapa[nuevo] = mapa[original]
+        try:
+            recursos_nuevos = trasplantar(temporal, recursos_t if recursos_t is not None else {}, doc, mapa)
+        except KeyError:
+            raise Limitacion("Este texto está en una parte del PDF que no se puede copiar sin "
+                                 "re-codificar una imagen; no se editó para no alterar el documento.")
     finally:
         temporal.close()
     xref_contenido = doc.get_new_xref()
     doc.update_object(xref_contenido, "<<>>")
     doc.update_stream(xref_contenido, contenido)
-    xref_recursos = doc.get_new_xref()
-    doc.update_object(xref_recursos, serializar_objeto(recursos_nuevos))
+    if isinstance(recursos_nuevos, Ref):
+        xref_recursos = int(recursos_nuevos)
+    else:
+        xref_recursos = doc.get_new_xref()
+        doc.update_object(xref_recursos, serializar_objeto(recursos_nuevos))
     doc.xref_set_key(pag.xref, "Contents", f"{xref_contenido} 0 R")
     doc.xref_set_key(pag.xref, "Resources", f"{xref_recursos} 0 R")
 
@@ -641,10 +721,10 @@ class EditarTexto(Operacion):
         perdidos = (antes - self.glifos_objetivo) - despues
         if perdidos:
             ejemplo = "".join(sorted(chr(g[0]) for g in perdidos))[:20]
-            raise ErrorDocumento(f"La edición habría borrado texto vecino («{ejemplo}»). "
+            raise Limitacion(f"La edición habría borrado texto vecino («{ejemplo}»). "
                                  "No se aplicó para no dañar el documento.")
         if self.glifos_objetivo & despues:
-            raise ErrorDocumento("No se pudo borrar por completo el texto original. No se aplicó.")
+            raise Limitacion("No se pudo borrar por completo el texto original. No se aplicó.")
         nuevas = [ln for ln in self.lineas if ln.fuente_datos is not None]
         for ln in self.lineas:
             if ln.fuente_xref is not None:
@@ -658,7 +738,7 @@ class EditarTexto(Operacion):
                 zona |= c
             extraido = pag.get_text("text", clip=zona + (-2, -2, 2, 2), flags=FLAGS_EXTRACCION)
             if _sin_espacios(self.texto_esperado) not in _sin_espacios(extraido):
-                raise ErrorDocumento("El texto escrito no se puede leer correctamente en el PDF "
+                raise Limitacion("El texto escrito no se puede leer correctamente en el PDF "
                                      "(problema de codificación de la fuente). No se aplicó.")
 
     def paginas_afectadas(self) -> set[int]:
@@ -806,7 +886,7 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
                desplazamiento: tuple[float, float] = (0.0, 0.0), cache: dict | None = None) -> PlanEdicion:
     """Arma la operación que edita (y/o mueve) el bloque. No modifica el documento."""
     if not bloque.es_horizontal:
-        raise ErrorDocumento("Por ahora solo se puede editar texto horizontal.")
+        raise Limitacion("Por ahora solo se puede editar texto horizontal.")
     pag = doc[bloque.pagina]
     dx, dy = desplazamiento
     avisos: list[str] = []
@@ -843,11 +923,11 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
             return PlanEdicion(op, avisos)
         lineas_dibujo = []
         if opcion is None:
-            raise ErrorDocumento("La fuente original no se puede reutilizar: elegí otra fuente.")
+            raise Limitacion("La fuente original no se puede reutilizar: elegí otra fuente.")
         avisos.append("La fuente original no se pudo reutilizar; se usa " + opcion.nombre + ".")
 
     if opcion is None or not opcion.disponible:
-        raise ErrorDocumento("La fuente elegida no tiene todos los caracteres del texto nuevo.")
+        raise Limitacion("La fuente elegida no tiene todos los caracteres del texto nuevo.")
     estilo = bloque.estilo
     if bloque.varios_estilos:
         avisos.append("El texto tenía varios estilos; el texto nuevo usa el estilo del comienzo.")

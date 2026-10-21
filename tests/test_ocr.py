@@ -273,6 +273,34 @@ def test_ocr_real_identico(copia_pdf, tmp_path):
 
 
 @requiere_tesseract
+def test_capa_ocr_real_se_edita_y_no_se_reemplaza_su_fuente(copia_pdf, tmp_path):
+    """La capa del OCR queda dentro de un XObject: se edita con copia al escribir, sigue
+    invisible (el aspecto no cambia) y el reemplazo de fuente la ignora."""
+    from pdf_studio import config
+    from pdf_studio.core.fuentes import IndiceFuentesSistema
+    from pdf_studio.core.sustitucion import familias_del_documento
+    from pdf_studio.core.texto import Nivel, analizar_fuente, bloque_en, planificar
+    ruta = copia_pdf("escaneado.pdf")
+    documento = Documento(ruta)
+    documento.ejecutar(ocr.AgregarCapaOCR(ocr.reconocer(documento.doc, [0], tmp_path, timeout=300)))
+    pag = documento.doc[0]
+    zona = pag.search_for("presupuesto")[0]
+    bloque = bloque_en(pag, 0, (zona.tl + zona.br) / 2, Nivel.LINEA)
+    assert bloque is not None and bloque.invisible
+    nuevo = bloque.texto.replace("presupuesto", "PRESUPUESTO")
+    incluidas = IndiceFuentesSistema([config.DIR_FUENTES_INCLUIDAS], tmp_path / "i.json")
+    opcion = analizar_fuente(documento.doc, pag, bloque.estilo, nuevo, None, incluidas).recomendada
+    documento.ejecutar(planificar(documento.doc, bloque, nuevo, opcion).operacion)
+    assert "PRESUPUESTO" in documento.doc[0].get_text()
+    assert all(s["type"] == 3 for s in documento.doc[0].get_texttrace() if s["chars"])
+    with pymupdf.open(ruta) as original:
+        assert _pixeles_iguales(original[0], documento.doc[0])
+    assert familias_del_documento(documento.doc) == []      # solo hay texto invisible
+    assert documento.guardar(tmp_path / "salida.pdf").es_fiel
+    documento.cerrar()
+
+
+@requiere_tesseract
 def test_ocr_real_reconstruido(copia_pdf, tmp_path):
     documento = Documento(copia_pdf("escaneado.pdf"))
     capas = ocr.reconocer(documento.doc, [0], tmp_path, timeout=300)
@@ -302,7 +330,8 @@ def test_ocr_sin_tesseract_avisa_en_la_interfaz(ventana, copia_pdf, monkeypatch)
     monkeypatch.setattr(ventana, "_dialogo_ocr", lambda sin_texto: (ocr.ModoOCR.IDENTICO, sin_texto))
     monkeypatch.setattr(ventana, "chequear_dependencias", lambda mostrar=True: None)
     assert not ventana.reconocer_texto()
-    assert ventana.mensajes[-1][2] and "Tesseract" in ventana.mensajes[-1][1]
+    # Que falte una herramienta no es una falla: aviso informativo (sin la X roja), con el panel Faltantes
+    assert not ventana.mensajes[-1][2] and "Tesseract" in ventana.mensajes[-1][1]
 
 
 def test_ocr_en_segundo_plano_con_proceso_simulado(ventana, copia_pdf, monkeypatch, qtbot):

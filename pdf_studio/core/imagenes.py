@@ -16,7 +16,7 @@ import pymupdf
 from PIL import Image, ImageOps
 
 from pdf_studio import config
-from pdf_studio.core.documento import ErrorDocumento, Operacion
+from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.pdfutil import independizar_recursos
 
 LADO_MAXIMO = 2000      # px; las firmas más grandes se reducen al guardarlas en la biblioteca
@@ -214,7 +214,7 @@ class InsertarImagen(Operacion):
         caja = self.caja()
         area = pag.rect * pag.derotation_matrix      # la página en coordenadas sin rotar
         if caja.is_empty or not caja.intersects(area):
-            raise ErrorDocumento("La imagen quedó fuera de la página.")
+            raise Limitacion("La imagen quedó fuera de la página.")
         independizar_recursos(doc, self.pagina)   # no tocar recursos de otras páginas
         antes = set(pag.get_contents())
         # La caja solo sirve para registrar la imagen; la matriz real se escribe abajo

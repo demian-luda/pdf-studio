@@ -15,7 +15,8 @@ from pdf_studio.ui import iconos
 from pdf_studio.ui.tema import marcar_primario
 from pdf_studio.ui.visor import pixmap_a_qimage
 
-DPI_PREVIA = 80
+ZOOMS = (50, 75, 100, 125, 150, 200)      # porcentajes de la vista previa
+ZOOM_INICIAL = 100
 
 
 class DialogoSustitucion(QDialog):
@@ -79,9 +80,10 @@ class DialogoSustitucion(QDialog):
         iconos.asignar(self.boton_previa, "eye")
         self.boton_previa.clicked.connect(self.generar_previa)
 
-        # Vista previa lado a lado
+        # Vista previa lado a lado: misma zona, mismo zoom y desplazamiento sincronizado
         self.vista_original = QLabel(self)
         self.vista_nueva = QLabel(self)
+        self.desplazables: list[QScrollArea] = []
         paneles = QSplitter(Qt.Orientation.Horizontal, self)
         for titulo, vista in (("Original", self.vista_original), ("Con la fuente nueva", self.vista_nueva)):
             caja = QWidget()
@@ -90,24 +92,41 @@ class DialogoSustitucion(QDialog):
             c.addWidget(QLabel(f"<b>{titulo}</b>"))
             desplazable = QScrollArea()
             desplazable.setWidgetResizable(True)
-            vista.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+            vista.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            vista.setAccessibleName(f"Vista previa: {titulo.lower()}")
             desplazable.setWidget(vista)
             c.addWidget(desplazable, 1)
             paneles.addWidget(caja)
+            self.desplazables.append(desplazable)
+        a, b = self.desplazables
+        for barra_a, barra_b in ((a.verticalScrollBar(), b.verticalScrollBar()),
+                                 (a.horizontalScrollBar(), b.horizontalScrollBar())):
+            barra_a.valueChanged.connect(barra_b.setValue)
+            barra_b.valueChanged.connect(barra_a.setValue)
         paneles.setStretchFactor(0, 1)
         paneles.setStretchFactor(1, 1)
         paneles.setSizes([1, 1])
         paneles.setChildrenCollapsible(False)
         self.pagina = QSpinBox(self)
         self.pagina.setPrefix("Página ")
+        self.pagina.setAccessibleName("Página de la vista previa")
         self.pagina.setRange(1, max(1, doc.page_count))
         self.pagina.valueChanged.connect(self._mostrar_pagina)
+        self.zoom = QComboBox(self)
+        self.zoom.setAccessibleName("Zoom de la vista previa")
+        self.zoom.setToolTip("Zoom de las dos vistas")
+        for z in ZOOMS:
+            self.zoom.addItem(f"{z}%", z)
+        self.zoom.setCurrentIndex(ZOOMS.index(ZOOM_INICIAL))
+        self.zoom.currentIndexChanged.connect(lambda _i: self._mostrar_pagina())
 
         self.resumen = QLabel("Generá la vista previa para ver el resultado.", self)
         self.resumen.setWordWrap(True)
         self.lista_ajustes = QListWidget(self)
         self.lista_ajustes.setMaximumHeight(120)
-        self.lista_ajustes.itemClicked.connect(lambda it: self.pagina.setValue(it.data(Qt.ItemDataRole.UserRole) + 1))
+        self.lista_ajustes.setAccessibleName("Líneas con ajuste de ancho")
+        self.lista_ajustes.itemClicked.connect(self._ir_al_ajuste)
+        self.lista_ajustes.itemActivated.connect(self._ir_al_ajuste)
 
         self.boton_aplicar = QPushButton("Aplicar", self)
         marcar_primario(self.boton_aplicar)
@@ -122,6 +141,7 @@ class DialogoSustitucion(QDialog):
         fila_previa.addWidget(self.boton_previa)
         fila_pagina = QHBoxLayout()
         fila_pagina.addWidget(self.pagina)
+        fila_pagina.addWidget(self.zoom)
         fila_pagina.addWidget(self.resumen, 1)
         botones = QHBoxLayout()
         botones.addStretch(1)
@@ -167,17 +187,23 @@ class DialogoSustitucion(QDialog):
             texto += "\nNo se reemplazan: " + "; ".join(self.plan.omitidos[:3])
         self.resumen.setText(texto)
         self.lista_ajustes.clear()
+        # Solo las líneas que se van a reemplazar (las de páginas omitidas no están en el plan)
         for a in self.plan.ajustes:
             item = QListWidgetItem(f"Página {a.pagina + 1}: {a.porcentaje:+.1f}%  «{a.texto}»")
-            item.setData(Qt.ItemDataRole.UserRole, a.pagina)
+            item.setData(Qt.ItemDataRole.UserRole, a)
             self.lista_ajustes.addItem(item)
-        self.boton_aplicar.setEnabled(self.plan.operacion is not None)
+        self.boton_aplicar.setEnabled(self.plan.operacion is not None and self.plan.reemplazados > 0)
         if self.plan.paginas:
             self.pagina.setValue(min(self.plan.paginas) + 1)
         self._mostrar_pagina()
 
+    @property
+    def escala(self) -> float:
+        return self.zoom.currentData() / 100
+
     def _render(self, doc: pymupdf.Document, indice: int) -> QPixmap:
-        return QPixmap.fromImage(pixmap_a_qimage(doc[indice].get_pixmap(dpi=DPI_PREVIA)))
+        matriz = pymupdf.Matrix(self.escala, self.escala)
+        return QPixmap.fromImage(pixmap_a_qimage(doc[indice].get_pixmap(matrix=matriz, alpha=False)))
 
     def _mostrar_pagina(self) -> None:
         i = self.pagina.value() - 1
@@ -185,7 +211,22 @@ class DialogoSustitucion(QDialog):
         if self._previa is not None:
             self.vista_nueva.setPixmap(self._render(self._previa, i))
         else:
-            self.vista_nueva.setText("(sin vista previa)")
+            # Mismo tamaño que la original, para que el desplazamiento siga sincronizado
+            vacia = QPixmap(self.vista_original.pixmap().size())
+            vacia.fill(Qt.GlobalColor.transparent)
+            self.vista_nueva.setPixmap(vacia)
+            self.vista_nueva.setToolTip("Generá la vista previa para ver el resultado.")
+
+    def _ir_al_ajuste(self, item: QListWidgetItem) -> None:
+        """Muestra la línea elegida en las dos vistas, en el mismo lugar."""
+        ajuste = item.data(Qt.ItemDataRole.UserRole)
+        if ajuste is None:
+            return
+        self.pagina.setValue(ajuste.pagina + 1)
+        pag = self.doc[ajuste.pagina]
+        punto = pymupdf.Point(0, ajuste.y) * pag.rotation_matrix * self.escala
+        barra = self.desplazables[0].verticalScrollBar()
+        barra.setValue(int(punto.y - self.desplazables[0].viewport().height() / 2))
 
     def done(self, resultado: int) -> None:
         if self._previa is not None:

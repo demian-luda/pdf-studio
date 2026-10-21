@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_studio.core.documento import ErrorDocumento
+from pdf_studio.core.documento import ErrorDocumento, Limitacion
 from pdf_studio.core.fidelidad import ResultadoFidelidad, comparar_documentos
 
 DPI_VERIFICACION = 100
@@ -143,7 +143,7 @@ def comprimir(entrada: Path, salida: Path, nivel: NivelCompresion, contrasena: s
     """Escribe en `salida` la versión comprimida de `entrada` (nunca modifica `entrada`)."""
     entrada, salida = Path(entrada), Path(salida)
     if entrada.resolve() == salida.resolve():
-        raise ErrorDocumento("La compresión no puede escribir sobre el archivo de entrada.")
+        raise Limitacion("La compresión no puede escribir sobre el archivo de entrada.")
     if nivel == NivelCompresion.MAXIMO:
         _comprimir_ghostscript(entrada, salida, contrasena, ghostscript)
         return
@@ -246,7 +246,7 @@ def _comprimir_ghostscript(entrada: Path, salida: Path, contrasena: str | None, 
         from pdf_studio.dependencias.chequeo import buscar_ghostscript
         exe = buscar_ghostscript()
     if exe is None:
-        raise ErrorDocumento("La compresión máxima necesita Ghostscript, que no está instalado. "
+        raise Limitacion("La compresión máxima necesita Ghostscript, que no está instalado. "
                              "Instalalo desde el panel Faltantes o elegí otro nivel.")
     argumentos = [str(exe), "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.6", "-dPDFSETTINGS=/ebook",
                   "-dNOPAUSE", "-dBATCH", "-dQUIET", "-dSAFER", f"-sOutputFile={salida}"]
@@ -297,7 +297,7 @@ def comprimir_y_verificar(entrada: Path, salida: Path, nivel: NivelCompresion,
     try:
         with _abrir(salida, contrasena) as d:
             if d.page_count != _contar(entrada, contrasena):
-                raise ErrorDocumento("La compresión cambió la cantidad de páginas: el resultado se descartó.")
+                raise Limitacion("La compresión cambió la cantidad de páginas: el resultado se descartó.")
     except ErrorDocumento:
         raise
     except Exception as e:

@@ -31,7 +31,7 @@ MAX_PAGINAS_OCR = 2
 # Rechazos controlados: la app se negó a editar con un aviso claro (no es un fallo).
 # Se informan por categoría para no mostrar el mensaje, que puede incluir texto del PDF.
 CATEGORIAS = [
-    ("XObject", "texto dentro de un objeto compartido (XObject)"),
+    ("re-codificar una imagen", "texto en una parte que obligaría a re-codificar una imagen"),
     ("vecino", "la edición habría borrado texto vecino"),
     ("codificación", "la fuente no permite releer el texto"),
     ("letras", "ninguna fuente disponible tiene las letras"),
@@ -195,8 +195,50 @@ def prueba_ocr(documento, tmp: Path) -> tuple[str, str]:
     if not set(capas) <= set(guardado.fidelidad.enteras):
         raise Fallo("fidelidad", AssertionError("no se compararon enteras las páginas con OCR"))
     nota = _guardar_y_verificar(documento, tmp / "ocr.pdf", True)
+    nota += _editar_capa_ocr(documento, reconocidas[0], tmp)
     return OK, (f"texto reconocido en {len(reconocidas)} de {len(paginas)} pág., aspecto idéntico "
                 f"(píxeles = 0)" + nota)
+
+
+def _editar_capa_ocr(documento, pno: int, tmp: Path) -> str:
+    """La capa del OCR (invisible, dentro de un XObject) se puede editar sin cambiar el
+    aspecto de la página, y el reemplazo de fuente no la toca."""
+    import pymupdf
+
+    from pdf_studio.core.documento import ErrorDocumento
+    from pdf_studio.core.fidelidad import comparar_paginas
+    from pdf_studio.core.fuentes import indice_incluidas, indice_sistema
+    from pdf_studio.core.sustitucion import familias_del_documento
+    from pdf_studio.core.texto import Nivel, analizar_fuente, bloque_en, lineas_de_pagina, planificar
+    doc = documento.doc
+    # La página no tenía texto antes del OCR: todo lo que tiene ahora es la capa invisible
+    if any(pno in f.paginas for f in _etapa("reemplazo de fuente", lambda: familias_del_documento(doc))):
+        raise Fallo("reemplazo de fuente", AssertionError("se listó la fuente de la capa invisible"))
+    lineas = [ln for b in _etapa("extraer capa", lambda: lineas_de_pagina(doc[pno])) for ln in b
+              if ln.texto.strip() and all(t.modo == 3 for t in ln.tramos)]
+    if not lineas:
+        return "; capa sin líneas editables"
+    antes = pymupdf.open()
+    antes.insert_pdf(doc, from_page=pno, to_page=pno)
+    caja = lineas[0].bbox
+    punto = pymupdf.Point(caja.x0 + min(2.0, caja.width / 2), (caja.y0 + caja.y1) / 2)
+    bloque = _etapa("editar capa", lambda: bloque_en(doc[pno], pno, punto, Nivel.LINEA))
+    if bloque is None or not bloque.invisible:
+        return "; capa sin líneas editables"
+    nuevo = bloque.texto.rstrip() + " 1"
+    try:
+        opcion = _etapa("editar capa", lambda: analizar_fuente(doc, doc[pno], bloque.estilo, nuevo, indice_sistema(),
+                                                                indice_incluidas()).recomendada)
+        documento.ejecutar(planificar(doc, bloque, nuevo, opcion).operacion)
+    except ErrorDocumento as e:
+        return f"; capa no editada ({_categoria(str(e))})"
+    except Exception as e:
+        raise Fallo("editar capa", e) from e
+    if comparar_paginas(antes[0], documento.doc[pno], 100)[0] != 0:
+        raise Fallo("editar capa", AssertionError("editar la capa invisible cambió el aspecto"))
+    antes.close()
+    _guardar_y_verificar(documento, tmp / "ocr_editado.pdf", True)
+    return "; capa invisible editada (aspecto idéntico)"
 
 
 def prueba_paginas(documento, tmp: Path) -> tuple[str, str]:
