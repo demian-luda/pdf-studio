@@ -39,7 +39,13 @@ computadora: los documentos no se suben a ningún lado.
 
 Si no querés instalarla, también funciona sin instalar: abrí `PDFStudio\PDFStudio.exe` desde la carpeta descomprimida.
 
-Si Windows muestra «Windows protegió su PC», es porque el ejecutable no está firmado por una empresa. Hacé clic en *Más información → Ejecutar de todas formas*.
+Si Windows muestra «Windows protegió su PC», es porque esta versión del ejecutable todavía no está firmada. Hacé clic en *Más información → Ejecutar de todas formas*. Para estar seguro de que el archivo es el original, compará su SHA-256 con el `SHA256SUMS.txt` del release:
+
+```powershell
+Get-FileHash .\PDFStudio-0.1.0-windows.zip -Algorithm SHA256
+```
+
+**Firma de código:** pedimos la firma gratuita para proyectos de código abierto de [SignPath Foundation](https://signpath.org/). Cuando la aprueben, los releases van a decir: *Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)*. La política de firma está en [CODE_SIGNING.md](CODE_SIGNING.md).
 
 **Para desinstalar:** *Configuración → Aplicaciones → PDF Studio → Desinstalar*. Las firmas que guardaste quedan en `%APPDATA%\PDFStudio`.
 
@@ -86,6 +92,16 @@ El script:
 - genera `dist\PDFStudio-<versión>-windows.zip`, que lleva el instalador, la licencia y `LICENCIAS-TERCEROS.txt`.
 
 Si querés solo la carpeta, sin el ZIP, agregá `--sin-zip`.
+
+Los releases oficiales no se arman en una computadora personal: los arma GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) a partir del código del repo, al crear un tag `v*`. Ese armado es reproducible:
+- Python, los paquetes y las acciones tienen la versión fija;
+- la fecha de los archivos es la del commit.
+
+El paso de firma con SignPath ya está en el workflow, desactivado hasta la aprobación (ver [CODE_SIGNING.md](CODE_SIGNING.md)).
+
+### Contribuir
+
+Las contribuciones entran por *pull request*. Quien tenga permiso de escritura en el repo o acceso al proyecto en SignPath tiene que tener activada la **autenticación en dos pasos** en GitHub y en SignPath. Es un requisito de la firma de código.
 
 ### Estructura
 

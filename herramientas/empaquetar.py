@@ -5,6 +5,11 @@ Uso (con el .venv):
     .\\.venv\\Scripts\\python.exe -m pip install -r requirements-empaquetado.txt
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py            # arma, prueba y comprime
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py --sin-zip  # solo la carpeta
+    ... empaquetar.py --sin-ventana          # sin abrir la ventana del .exe (servidores de CI)
+    ... empaquetar.py --zip-desde CARPETA    # solo el ZIP de una carpeta ya armada (p. ej. firmada)
+
+Los releases oficiales los arma GitHub Actions (.github/workflows/release.yml); con
+SOURCE_DATE_EPOCH el ZIP es reproducible. También se escribe dist\\SHA256SUMS.txt.
 
 Resultado:
     dist\\PDF Studio\\PDFStudio\\PDFStudio.exe   (la aplicación)
@@ -188,13 +193,27 @@ def prueba_ventana(exe: Path, segundos: float = 12.0) -> bool:
     return sigue
 
 
-def comprimir() -> Path:
+def comprimir(carpeta: Path = SALIDA) -> Path:
+    """ZIP reproducible: orden fijo, rutas con «/» y fecha fija (SOURCE_DATE_EPOCH, la del
+    commit en GitHub Actions; si no está, la de los archivos)."""
+    import os
+    import time
     destino = DIST / f"PDFStudio-{__version__}-windows.zip"
     destino.unlink(missing_ok=True)
+    epoca = os.environ.get("SOURCE_DATE_EPOCH")
+    fecha = time.gmtime(max(int(epoca), 315532800))[:6] if epoca else None      # el ZIP no admite antes de 1980
     with zipfile.ZipFile(destino, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for ruta in sorted(SALIDA.rglob("*")):
-            if ruta.is_file():
-                z.write(ruta, Path(NOMBRE_APP) / ruta.relative_to(SALIDA))
+        for ruta in sorted(carpeta.rglob("*"), key=lambda p: p.relative_to(carpeta).as_posix()):
+            if not ruta.is_file():
+                continue
+            nombre = (Path(NOMBRE_APP) / ruta.relative_to(carpeta)).as_posix()
+            if fecha is None:
+                z.write(ruta, nombre)
+                continue
+            info = zipfile.ZipInfo(nombre, date_time=fecha)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            z.writestr(info, ruta.read_bytes(), compresslevel=6)
     return destino
 
 
@@ -203,13 +222,31 @@ def tamano(carpeta: Path) -> str:
     return f"{total / 1024 / 1024:.0f} MB"
 
 
+def sumas_sha256(*archivos: Path) -> Path:
+    """SHA256SUMS.txt al lado de los archivos (formato de sha256sum)."""
+    import hashlib
+    destino = DIST / "SHA256SUMS.txt"
+    lineas = [f"{hashlib.sha256(a.read_bytes()).hexdigest()}  {a.name}" for a in archivos]
+    destino.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    return destino
+
+
 def main(argv: list[str]) -> int:
+    if "--zip-desde" in argv:
+        # Solo comprimir una carpeta ya armada (p. ej. la que devuelve SignPath con el .exe firmado)
+        carpeta = Path(argv[argv.index("--zip-desde") + 1])
+        zip_ = comprimir(carpeta)
+        print(f"ZIP: {zip_}\n{sumas_sha256(zip_).read_text(encoding='utf-8')}")
+        return 0
     exe = armar()
     print(f"Listo: {exe} ({tamano(SALIDA)})")
-    if "--sin-prueba" not in argv and not (autoprueba(exe) and prueba_ventana(exe)):
+    if "--sin-prueba" not in argv and not autoprueba(exe):
+        return 1
+    if "--sin-prueba" not in argv and "--sin-ventana" not in argv and not prueba_ventana(exe):
         return 1
     if "--sin-zip" not in argv:
         zip_ = comprimir()
+        sumas_sha256(zip_)
         print(f"ZIP para compartir: {zip_} ({zip_.stat().st_size / 1024 / 1024:.0f} MB)")
     return 0
 

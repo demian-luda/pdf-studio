@@ -136,6 +136,57 @@ def test_instalar_y_desinstalar_en_modo_de_prueba(tmp_path):
                        timeout=60)
 
 
+def test_zip_reproducible_y_sumas(tmp_path, monkeypatch):
+    """Con SOURCE_DATE_EPOCH, el mismo contenido da exactamente el mismo ZIP (aunque cambien las
+    fechas de los archivos), y SHA256SUMS.txt lo describe."""
+    import hashlib
+    import os
+    import time
+    empaquetar = pytest.importorskip("empaquetar")
+    carpeta = tmp_path / "PDF Studio"
+    (carpeta / "PDFStudio" / "_internal").mkdir(parents=True)
+    (carpeta / "PDFStudio" / "PDFStudio.exe").write_bytes(b"MZ" + bytes(range(256)) * 10)
+    (carpeta / "PDFStudio" / "_internal" / "b.txt").write_text("b", encoding="utf-8")
+    (carpeta / "instalar.ps1").write_text("# instalar", encoding="utf-8")
+    monkeypatch.setattr(empaquetar, "DIST", tmp_path)
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1761000000")
+    primero = hashlib.sha256(empaquetar.comprimir(carpeta).read_bytes()).hexdigest()
+    ahora = time.time() + 3600
+    for ruta in carpeta.rglob("*"):
+        os.utime(ruta, (ahora, ahora))
+    zip_ = empaquetar.comprimir(carpeta)
+    assert hashlib.sha256(zip_.read_bytes()).hexdigest() == primero
+    import zipfile
+    with zipfile.ZipFile(zip_) as z:
+        assert z.namelist() == ["PDF Studio/PDFStudio/PDFStudio.exe", "PDF Studio/PDFStudio/_internal/b.txt",
+                                "PDF Studio/instalar.ps1"]
+        assert {i.date_time for i in z.infolist()} == {time.gmtime(1761000000)[:6]}
+    sumas = empaquetar.sumas_sha256(zip_).read_text(encoding="utf-8")
+    assert sumas == f"{primero}  {zip_.name}\n"
+
+
+def test_workflow_de_release():
+    """El workflow arma con versiones fijas y la firma de SignPath está desactivada hasta configurarla."""
+    import re
+    texto = (RAIZ / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    usos = re.findall(r"uses:\s*([^\s]+)", texto)
+    assert usos and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in usos), usos
+    assert 'tags: ["v*"]' in texto and "windows-latest" in texto
+    assert re.search(r'PYTHON_VERSION: "\d+\.\d+\.\d+"', texto) and "requirements-empaquetado.txt" in texto
+    firma = texto[texto.index("Firmar con SignPath"):texto.index("Comprobar la firma")]
+    assert "if: ${{ vars.SIGNPATH_HABILITADO == 'true' }}" in firma
+    assert "secrets.SIGNPATH_API_TOKEN" in firma
+    # Todas las variables que usa el workflow están documentadas en CODE_SIGNING.md
+    politica = (RAIZ / "CODE_SIGNING.md").read_text(encoding="utf-8")
+    for nombre in set(re.findall(r"(?:vars|secrets)\.(SIGNPATH_\w+)", texto)):
+        assert nombre in politica, nombre
+    assert "SignPath Foundation" in (RAIZ / "README.md").read_text(encoding="utf-8")
+    # Los paquetes del armado tienen versión fija
+    for linea in (RAIZ / "requirements-empaquetado.txt").read_text(encoding="utf-8").splitlines():
+        if linea and not linea.startswith(("#", "-r")):
+            assert "==" in linea, linea
+
+
 def test_instalar_cmd_es_ascii():
     datos = (INSTALADOR / "Instalar.cmd").read_bytes()
     datos.decode("ascii")

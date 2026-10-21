@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Configuración de artefacto de SignPath para PDF Studio (ver CODE_SIGNING.md).
+  El artefacto es la carpeta «dist/PDF Studio» que sube el workflow .github/workflows/release.yml
+  (GitHub Actions la entrega como ZIP). Se firman, con Authenticode:
+    - PDFStudio/PDFStudio.exe: la aplicación (el mismo .exe corre las tareas auxiliares).
+    - instalar.ps1 y desinstalar.ps1: los scripts del instalador.
+  Copiar este contenido en SignPath → Project → Artifact Configurations.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <directory path="PDFStudio">
+      <pe-file path="PDFStudio.exe">
+        <authenticode-sign />
+      </pe-file>
+    </directory>
+    <powershell-file path="instalar.ps1">
+      <authenticode-sign />
+    </powershell-file>
+    <powershell-file path="desinstalar.ps1">
+      <authenticode-sign />
+    </powershell-file>
+  </zip-file>
+</artifact-configuration>
