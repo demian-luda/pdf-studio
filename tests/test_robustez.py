@@ -24,6 +24,7 @@ ESPERADO = {
     "truetype_simbolica.pdf": {Embebido.SUBCONJUNTO, Embebido.NO_ANALIZADA},
     "cid_cidtogid.pdf": {Embebido.SUBCONJUNTO, Embebido.NO_ANALIZADA},
     "quicksand_sin_glifo.pdf": {Embebido.SUBCONJUNTO},
+    "lista_word_simbolo.pdf": {Embebido.SUBCONJUNTO},
 }
 
 
@@ -39,10 +40,9 @@ def test_analisis_nunca_falla(nombre, incluidas):
     with pymupdf.open(DESTINO / nombre) as doc:
         fuentes = analizar_fuentes(doc, None, incluidas)
         especial = [f for f in fuentes if f.nombre != "Helvetica"]
-        assert len(especial) == 1
-        assert especial[0].embebido in ESPERADO[nombre], especial[0].embebido
+        assert especial and all(f.embebido in ESPERADO[nombre] for f in especial), especial
         fuentes2, faltan = chequear_fuentes(doc, None, incluidas)
-        assert len(fuentes2) == 2
+        assert len(fuentes2) == len(fuentes)
 
 
 def test_truetype_sin_cmap_como_la_prefactura():

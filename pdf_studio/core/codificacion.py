@@ -15,6 +15,7 @@ de los glifos no está en el archivo.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 import pymupdf
@@ -196,6 +197,9 @@ class CodificadorFuente:
                 continue
             if ch not in self.a_codigo or (self.disponibles is not None and ch not in self.disponibles
                                            and ch != " "):
+                faltan.append(ch)
+            elif self.anchos.get(self.a_codigo[ch]) == 0 and unicodedata.category(ch) not in ("Mn", "Me", "Cf"):
+                # Ancho 0 en /Widths: es un código que el subconjunto no usa, no un glifo disponible
                 faltan.append(ch)
         return faltan
 

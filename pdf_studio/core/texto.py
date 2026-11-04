@@ -13,16 +13,25 @@ Técnica (principio 2: tocar solo lo editado):
 4. Se verifica que el texto nuevo se pueda extraer tal cual.
 Además, la operación declara las zonas que tocó: la verificación de fidelidad
 compara el resto de la página píxel por píxel.
+
+Edición mínima: cuando el texto cambia en su lugar, primero se hace un diff y se tocan solo
+los tramos distintos, directamente en los operadores (ver core/cirugia.py). Lo anterior queda
+para mover texto, reacomodar los renglones de un párrafo y el texto dentro de Form XObject.
 """
 from __future__ import annotations
 
+import difflib
 import io
+import re
 import statistics
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pymupdf
 
+from pdf_studio.core.cirugia import (Flujo, Mostrar, Reemplazo, Unidad, avance_codigo, avance_en_flujo,
+                                     codificador_de, extra_de_espaciado, leer_flujo, reescribir)
 from pdf_studio.core.codificacion import CodificadorFuente, construir_codificador
 from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.fuentes import (Embebido, IndiceFuentesSistema, bytes_de_fuente, clase_de_fuente_pdf,
@@ -488,6 +497,7 @@ class LineaADibujar:
     fuente_datos: bytes | None = None    # o embeber esta (ya recortada)
     ascender: float = 0.9
     descender: float = -0.2
+    crudos: dict[int, int] = field(default_factory=dict)   # token -> código original (carácter sin glifo)
 
     def caja(self, avance) -> pymupdf.Rect:
         x0 = self.tokens[0][1]
@@ -562,11 +572,14 @@ def dibujar_con_fuente_original(doc: pymupdf.Document, pag: pymupdf.Page, linea:
     origen = pymupdf.Point(x0, linea.y) * a_pdf
     partes = []
     for i, (tok, x) in enumerate(linea.tokens):
-        if tok not in cod.a_codigo:
+        crudo = linea.crudos.get(i)
+        if crudo is None and tok not in cod.a_codigo:
             raise Limitacion(f"La fuente original no tiene el carácter «{tok}».")
-        partes.append(f"<{cod.codigo(tok).hex()}>")
+        codigo = crudo.to_bytes(cod.bytes_por_codigo, "big") if crudo is not None else cod.codigo(tok)
+        partes.append(f"<{codigo.hex()}>")
         if i + 1 < len(linea.tokens):
-            natural = cod.avance(tok) / 1000 * linea.tamano * linea.escala_h
+            ancho = avance_codigo(cod, crudo) if crudo is not None else cod.avance(tok)
+            natural = ancho / 1000 * linea.tamano * linea.escala_h
             delta = linea.tokens[i + 1][1] - x - natural
             if abs(delta) > 1e-4:
                 partes.append(_num(-delta * 1000 / (linea.tamano * linea.escala_h)))
@@ -756,8 +769,10 @@ class EditarTexto(Operacion):
 
     def __init__(self, pagina: int, rects_borrar: list[tuple], lineas: list[LineaADibujar],
                  texto_esperado: str, cajas_nuevas: list[tuple], descripcion: str = "Editar texto",
-                 zonas_borradas: list[tuple] | None = None, glifos_objetivo: list[tuple] | None = None):
+                 zonas_borradas: list[tuple] | None = None, glifos_objetivo: list[tuple] | None = None,
+                 conservados: set[str] | None = None):
         self.pagina = pagina
+        self.conservados = conservados or set()    # van aparte, en su fuente original
         # Glifos que el usuario quiere borrar: (unicode, x, y) redondeados
         self.glifos_objetivo = {tuple(g) for g in (glifos_objetivo or [])}
         self.rects_borrar = [tuple(r) for r in rects_borrar]
@@ -794,8 +809,11 @@ class EditarTexto(Operacion):
             zona = pymupdf.Rect(self.cajas_nuevas[0])
             for c in self.cajas_nuevas[1:]:
                 zona |= c
-            extraido = pag.get_text("text", clip=zona + (-2, -2, 2, 2), flags=FLAGS_EXTRACCION)
-            if _sin_espacios(self.texto_esperado) not in _sin_espacios(extraido):
+            extraido = _sin_espacios(pag.get_text("text", clip=zona + (-2, -2, 2, 2), flags=FLAGS_EXTRACCION))
+            trozos = [_sin_espacios(self.texto_esperado)]
+            if self.conservados:
+                trozos = re.split("[" + re.escape("".join(self.conservados)) + "]", trozos[0])
+            if any(t not in extraido for t in trozos):
                 raise Limitacion("El texto escrito no se puede leer correctamente en el PDF "
                                      "(problema de codificación de la fuente). No se aplicó.")
 
@@ -807,6 +825,493 @@ class EditarTexto(Operacion):
 
     def descripcion(self) -> str:
         return f"{self._descripcion} en página {self.pagina + 1}"
+
+
+class EditarMinimo(Operacion):
+    """Cambia solo algunos glifos, en sus operadores: el resto de la página queda intacto."""
+    nombre = "Editar texto"
+
+    def __init__(self, pagina: int, reemplazos: list[Reemplazo], adelantos: dict[int, float],
+                 fuentes_nuevas: dict[str, bytes], esperados: list[tuple], insertados: int,
+                 textos: list[tuple[str, tuple]], zonas: list[tuple], descripcion: str = "Editar texto"):
+        self.pagina = pagina
+        self.reemplazos = reemplazos
+        self.adelantos = adelantos
+        self.fuentes_nuevas = fuentes_nuevas
+        self.esperados = esperados      # (unicode, x, y) de todo glifo que tiene que seguir en la página
+        self.insertados = insertados    # cuántos glifos nuevos tiene que haber
+        self.textos = textos            # (texto nuevo, caja): tiene que poder extraerse
+        self.zonas = zonas
+        self._descripcion = descripcion
+
+    def aplicar(self, doc: pymupdf.Document) -> None:
+        independizar_recursos(doc, self.pagina)
+
+        def nombre_de_xref(xref: int) -> str:
+            return _nombre_recurso(doc, doc[self.pagina], xref)
+
+        reescribir(doc, self.pagina, self.reemplazos, self.adelantos, self.fuentes_nuevas, nombre_de_xref)
+        pag = doc[self.pagina]
+        # Todo lo demás tiene que seguir en su lugar: se compara contra lo que se esperaba
+        despues: dict[tuple, list[float]] = {}
+        total = 0
+        for span in pag.get_texttrace():
+            for c in span["chars"]:
+                if c[1] != -1:
+                    despues.setdefault((c[0], round(c[2][1], 1)), []).append(c[2][0])
+                    total += 1
+        for ucs, x, y in self.esperados:
+            xs = despues.get((ucs, round(y, 1)), [])
+            cerca = next((v for v in xs if abs(v - x) <= 0.03), None)
+            if cerca is None:
+                raise Limitacion("La edición habría movido o borrado otro texto de la página. "
+                                 "No se aplicó para no dañar el documento.")
+            xs.remove(cerca)
+        if total != len(self.esperados) + self.insertados:
+            raise Limitacion("La edición no dio el resultado esperado. No se aplicó para no dañar el documento.")
+        for texto, caja in self.textos:
+            extraido = _sin_espacios(pag.get_text("text", clip=pymupdf.Rect(caja) + (-2, -2, 2, 2),
+                                                  flags=FLAGS_EXTRACCION))
+            if _sin_espacios(texto) in extraido:
+                continue
+            # Con métricas raras, el recorte puede dejar afuera un glifo que está en su lugar
+            if _sin_espacios(texto) not in _sin_espacios(pag.get_text("text", flags=FLAGS_EXTRACCION)):
+                raise Limitacion("El texto escrito no se puede leer correctamente en el PDF "
+                                 "(problema de codificación de la fuente). No se aplicó.")
+
+    def paginas_afectadas(self) -> set[int]:
+        return {self.pagina}
+
+    def regiones_afectadas(self) -> dict[int, list[tuple]]:
+        return {self.pagina: self.zonas}
+
+    def descripcion(self) -> str:
+        return f"{self._descripcion} en página {self.pagina + 1}"
+
+
+# ---------------------------------------------------------------------- diff
+ESPACIO_SIN_CODIGO = 250.0     # avance de un espacio si la fuente no tiene ese carácter
+_EQUIVALENTE_MINIMO = 3        # un tramo igual más corto, entre dos cambios, no vale la pena conservarlo
+# Si el texto nuevo es más corto, lo que sigue no se mueve mientras el hueco no pase de esto (en em).
+# Más grande se notaría y partiría la línea al extraer el texto: buscar y copiar dejarían de andar
+HUECO_TOLERADO = 0.3
+TOLERANCIA_ANCHO = 0.01        # en puntos: menos que esto es redondeo, no un texto que no entra
+GAP_COLUMNA = 1.0              # una separación así (en em) es una columna: el corrimiento no la cruza
+
+
+def _diff(a: str, b: str) -> list[list[int]]:
+    return [[i1, i2, j1, j2] for op, i1, i2, j1, j2 in
+            difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes() if op != "equal"]
+
+
+def cambios_de_texto(original: str, nuevo: str, conservados: set[str] | None = None) -> list[list[int]]:
+    """[i1, i2, j1, j2]: original[i1:i2] pasa a ser nuevo[j1:j2]. Los caracteres conservados se
+    alinean primero, para que un diff desafortunado nunca los toque si siguen estando."""
+    conservados = conservados or set()
+    pos_a = [i for i, c in enumerate(original) if c in conservados]
+    pos_b = [j for j, c in enumerate(nuevo) if c in conservados]
+    anclas = []
+    matcher = difflib.SequenceMatcher(None, [original[i] for i in pos_a], [nuevo[j] for j in pos_b], autojunk=False)
+    for bloque in matcher.get_matching_blocks():
+        anclas += [(pos_a[bloque.a + k], pos_b[bloque.b + k]) for k in range(bloque.size)]
+    cambios: list[list[int]] = []
+    ia, ib = 0, 0
+    for a, b in anclas + [(len(original), len(nuevo))]:
+        cambios += [[i1 + ia, i2 + ia, j1 + ib, j2 + ib] for i1, i2, j1, j2 in _diff(original[ia:a], nuevo[ib:b])]
+        ia, ib = a + 1, b + 1
+    # Une cambios separados por un tramo igual muy corto ("casa" -> "taza": mejor toda la palabra)
+    unidos: list[list[int]] = []
+    for c in cambios:
+        if unidos:
+            entre = original[unidos[-1][1]:c[0]]
+            if len(entre) < _EQUIVALENTE_MINIMO and not set(entre) & conservados:
+                unidos[-1][1], unidos[-1][3] = c[1], c[3]
+                continue
+        unidos.append(list(c))
+    return unidos
+
+
+def mapa_de_texto(bloque: "BloqueTexto") -> tuple[str, list[Glifo | None]]:
+    """El texto del bloque y, por cada carácter, su glifo (None: espacio entre renglones)."""
+    if bloque.nivel != Nivel.PARRAFO:
+        ln = bloque.lineas[0]
+        return ln.texto, list(ln.glifos)
+    texto = ""
+    mapa: list[Glifo | None] = []
+    for ln in bloque.lineas:
+        crudo = ln.texto
+        inicio = len(crudo) - len(crudo.lstrip())
+        parte = crudo.strip()
+        glifos = ln.glifos[inicio:inicio + len(parte)]
+        if texto.endswith("-") and parte[:1].islower():
+            texto, mapa = texto[:-1], mapa[:-1]
+        elif texto:
+            texto += " "
+            mapa.append(None)
+        texto += parte
+        mapa += glifos
+    return texto, mapa
+
+
+def texto_a_dibujar(bloque: "BloqueTexto", texto: str) -> str:
+    """Los caracteres que hay que dibujar de nuevo: los únicos que necesitan una fuente."""
+    original, _ = mapa_de_texto(bloque)
+    if bloque.nivel != Nivel.PARRAFO:
+        texto = texto.replace("\n", " ")
+    return "".join(texto[c[2]:c[3]] for c in cambios_de_texto(original, texto, bloque.caracteres_sin_glifo))
+
+
+def tramo_de_cambio(bloque: "BloqueTexto", texto: str) -> "Tramo":
+    """El tramo donde está el primer cambio: de él sale el estilo del texto nuevo."""
+    original, mapa = mapa_de_texto(bloque)
+    cambios = cambios_de_texto(original, texto, bloque.caracteres_sin_glifo)
+    if cambios:
+        i = cambios[0][0]
+        glifo = next((g for g in mapa[i:] if g is not None), None) or next(
+            (g for g in reversed(mapa[:i]) if g is not None), None)
+        for ln in bloque.lineas:
+            for t in ln.tramos:
+                if any(g is glifo for g in t.glifos):
+                    return t
+    return bloque.estilo
+
+
+def analizar_edicion(doc: pymupdf.Document, pag: pymupdf.Page, bloque: "BloqueTexto", texto: str,
+                     indice: IndiceFuentesSistema | None, incluidas: IndiceFuentesSistema | None,
+                     cache: dict | None = None) -> "AnalisisFuente":
+    """Opciones de fuente para una edición: solo importa lo que se dibuja de nuevo. Lo que no
+    cambia queda con sus códigos, tenga o no glifo, y no puede bloquear la edición."""
+    return analizar_fuente(doc, pag, tramo_de_cambio(bloque, texto), texto_a_dibujar(bloque, texto),
+                           indice, incluidas, cache)
+
+
+def _ampliar_a_palabras(cambios: list[list[int]], original: str, nuevo: str, conservados: set[str],
+                        fuente: pymupdf.Font) -> list[list[int]]:
+    """Con otra fuente, no se mezclan dos fuentes dentro de una misma palabra."""
+    def de_palabra(c: str) -> bool:
+        return not c.isspace() and c not in conservados and bool(fuente.has_glyph(ord(c)))
+
+    ampliados: list[list[int]] = []
+    for i1, i2, j1, j2 in cambios:
+        while i1 > 0 and j1 > 0 and original[i1 - 1] == nuevo[j1 - 1] and de_palabra(original[i1 - 1]):
+            i1, j1 = i1 - 1, j1 - 1
+        while i2 < len(original) and j2 < len(nuevo) and original[i2] == nuevo[j2] and de_palabra(original[i2]):
+            i2, j2 = i2 + 1, j2 + 1
+        if ampliados and i1 <= ampliados[-1][1]:
+            ampliados[-1][1], ampliados[-1][3] = i2, j2
+        else:
+            ampliados.append([i1, i2, j1, j2])
+    return ampliados
+
+
+def zlib_crc(datos: bytes) -> int:
+    import zlib
+    return zlib.crc32(datos)
+
+
+def _plan_minimo(doc: pymupdf.Document, bloque: "BloqueTexto", nuevo: str, opcion: "OpcionFuente | None",
+                 cache: dict | None) -> "PlanEdicion | None":
+    """Plan que toca solo lo que cambió. None si este bloque requiere reescribirse:
+    renglones que hay que reacomodar o texto al que no se puede llegar en los operadores."""
+    pag = doc[bloque.pagina]
+    flujo = leer_flujo(doc, pag)
+    if flujo is None:
+        return None
+    original, mapa = mapa_de_texto(bloque)
+    conservados = bloque.caracteres_sin_glifo
+    cambios = cambios_de_texto(original, nuevo, conservados)
+    if not cambios:
+        return None
+    avisos: list[str] = []
+    otra_fuente = None
+    datos_nuevos: bytes | None = None
+    clave_nueva = ""
+    if opcion is not None and opcion.tipo != "original":
+        try:
+            completa = pymupdf.Font(fontbuffer=opcion.datos_fuente())
+        except Exception as e:
+            raise Limitacion(f"No se pudo preparar la fuente «{opcion.nombre}» ({type(e).__name__}). "
+                             "Elegí otra opción.")
+        cambios = _ampliar_a_palabras(cambios, original, nuevo, conservados, completa)
+        dibujar = "".join(nuevo[c[2]:c[3]] for c in cambios)
+        faltan = [c for c in dict.fromkeys(dibujar) if c.strip() and not completa.has_glyph(ord(c))]
+        if faltan:
+            raise Limitacion("La fuente elegida no tiene todos los caracteres del texto nuevo.")
+        datos_nuevos = subconjunto(opcion.datos_fuente(), dibujar)
+        otra_fuente = pymupdf.Font(fontbuffer=datos_nuevos)
+        clave_nueva = f"{zlib_crc(datos_nuevos):08x}"
+        if opcion.tipo == "sustituta":
+            avisos.append(f"Se usó la fuente sustituta «{opcion.nombre}» para el texto nuevo; "
+                          "lo que no cambió sigue con su fuente original.")
+
+    # Contexto: las líneas completas, aunque se edite un fragmento
+    lineas_ctx = bloque.lineas_del_parrafo or bloque.lineas
+    linea_de: dict[int, Linea] = {}
+    tramo_de: dict[int, Tramo] = {}
+    for ln in list(lineas_ctx) + list(bloque.lineas):
+        for t in ln.tramos:
+            for g in t.glifos:
+                linea_de[id(g)] = ln
+                tramo_de[id(g)] = t
+
+    def glifos_ctx(ln: Linea, ejemplo: Glifo) -> list[Glifo]:
+        for candidata in lineas_ctx:
+            if abs(candidata.base_y - ejemplo.y) < 0.01 and any(abs(g.x - ejemplo.x) < 0.05 for g in candidata.glifos):
+                return candidata.glifos
+        return ln.glifos
+
+    # Cada cambio se resuelve a glifos del flujo; si algo no se puede, se reescribe el bloque
+    indice_de: dict[int, list[int]] = {}
+
+    def indices(g: Glifo) -> list[int]:
+        if id(g) not in indice_de:
+            indice_de[id(g)] = flujo.buscar(g.c, g.x, g.y)
+        return indice_de[id(g)]
+
+    por_linea: dict[int, list[dict]] = {}
+    lineas_por_id: dict[int, list[Glifo]] = {}
+    for i1, i2, j1, j2 in cambios:
+        texto = nuevo[j1:j2]
+        if "\n" in texto:
+            return None
+        borrados = mapa[i1:i2]
+        if None in borrados:
+            return None          # une o separa renglones
+        previo = next((g for g in reversed(mapa[:i1]) if g is not None), None)
+        siguiente = next((g for g in mapa[i2:] if g is not None), None)
+        if i1 > 0 and mapa[i1 - 1] is None and not borrados and texto:
+            return None          # escribe justo entre dos renglones
+        ejemplo = borrados[0] if borrados else (previo if previo is not None and (
+            siguiente is None or abs(previo.y - siguiente.y) < 0.01 or i1 == len(mapa)) else siguiente)
+        if ejemplo is None:
+            return None
+        if any(abs(g.y - ejemplo.y) > 0.01 for g in borrados):
+            return None          # abarca más de un renglón
+        en_linea = glifos_ctx(linea_de[id(ejemplo)], ejemplo)
+        if not all(indices(g) for g in borrados + [ejemplo]):
+            return None
+        if any(flujo.glifos[k].mostrar is None for g in borrados + [ejemplo] for k in indices(g)):
+            return None          # dentro de un Form XObject
+        # Ligadura: dos caracteres de un solo código. No se puede cambiar solo uno
+        for g in borrados:
+            for k in indices(g):
+                compartidos = [o for o in en_linea if o is not g and k in indices(o)]
+                if any(not any(o is b for b in borrados) for o in compartidos):
+                    return None
+        lineas_por_id[id(en_linea)] = en_linea
+        por_linea.setdefault(id(en_linea), []).append(
+            {"i": (i1, i2), "texto": texto, "borrados": borrados, "ejemplo": ejemplo, "previo": previo})
+
+    reemplazos: list[Reemplazo] = []
+    adelantos: dict[int, float] = {}
+    esperados_movidos: dict[int, float] = {}
+    borrados_flujo: set[int] = set()
+    insertados = 0
+    textos: list[tuple[str, tuple]] = []
+    zonas: list[tuple] = []
+    cods = cache if cache is not None else {}
+    x_derecho = max(ln.bbox.x1 for ln in bloque.lineas)
+    for id_linea, lista in por_linea.items():
+        en_linea = lineas_por_id[id_linea]
+        posicion = {id(g): n for n, g in enumerate(en_linea)}
+        desplazamiento = 0.0
+        hasta = 0        # glifos de la línea ya procesados
+        instr_previa = -1
+        zonas_movidas: list[tuple] = []
+        for cambio in sorted(lista, key=lambda c: c["i"][0]):
+            borrados, ejemplo, texto = cambio["borrados"], cambio["ejemplo"], cambio["texto"]
+            tramo = tramo_de[id(ejemplo)]
+            m: Mostrar = flujo.glifos[indices(ejemplo)[0]].mostrar
+            cod = codificador_de(doc, m.xref, cods)
+            if cod is None:
+                return None
+            # Lo que está antes del cambio, con el corrimiento que traiga
+            n_inicio = posicion.get(id(borrados[0])) if borrados else None
+            if n_inicio is None and borrados:
+                return None
+            if not borrados:
+                n_previo = posicion.get(id(ejemplo))
+                if n_previo is None:
+                    return None
+                n_inicio = n_previo + (1 if ejemplo is cambio["previo"] else 0)
+            if desplazamiento:
+                corrido = _correr_tramo(en_linea, hasta, n_inicio, indices, flujo, desplazamiento, tramo_de, adelantos,
+                                        esperados_movidos, instr_previa, zonas_movidas)
+                if corrido is None:
+                    return None
+                desplazamiento = corrido[0]
+            hasta = n_inicio
+            instr_previa = m.indice
+            unidades, avance_nuevo = _unidades(texto, m, cod, opcion, otra_fuente, clave_nueva, flujo)
+            insertados += sum(1 for u in unidades if u.codigo is not None)
+            avance_viejo = 0.0
+            flujo_borrar: list[int] = []
+            for g in borrados:
+                for k in indices(g):
+                    if k in flujo_borrar:
+                        continue
+                    mg = flujo.glifos[k].mostrar
+                    cg = codificador_de(doc, mg.xref, cods)
+                    if cg is None:
+                        return None
+                    flujo_borrar.append(k)
+                    if not any(k2 in flujo_borrar for k2 in indices(g) if k2 != k):
+                        avance_viejo += avance_en_flujo(mg, cg, flujo.glifos[k].codigo)
+            borrados_flujo.update(flujo_borrar)
+            th = m.tz / 100
+            por_punto = 1000 / (tramo.tamano * th) if tramo.tamano and th else 0.0
+            x_inicio = (borrados[0].x if borrados else (en_linea[n_inicio].x if n_inicio < len(en_linea)
+                                                       else en_linea[-1].bbox[2])) + desplazamiento
+            fin_nuevo = x_inicio + (avance_nuevo / por_punto if por_punto else 0.0)
+            n_fin = n_inicio + len(borrados)
+            proximo = en_linea[n_fin] if n_fin < len(en_linea) else None
+            nuevo_desplazamiento = 0.0
+            if proximo is not None:
+                diferencia = fin_nuevo - proximo.x
+                # No entra, o deja un hueco que se notaría. Una columna aparte no se toca
+                columna = borrados and proximo.x - borrados[-1].bbox[2] >= GAP_COLUMNA * tramo.tamano
+                if diferencia > TOLERANCIA_ANCHO or (diferencia < -HUECO_TOLERADO * tramo.tamano and not columna):
+                    nuevo_desplazamiento = diferencia
+            # El número del TJ deja lo que sigue en su lugar, más el corrimiento si no entra
+            ajuste = avance_nuevo - avance_viejo - (nuevo_desplazamiento - desplazamiento) * por_punto
+            if borrados:
+                reemplazos.append(Reemplazo(flujo_borrar, None, None, unidades, ajuste))
+            elif ejemplo is cambio["previo"]:
+                reemplazos.append(Reemplazo([], indices(ejemplo)[-1], None, unidades, ajuste))
+            else:
+                reemplazos.append(Reemplazo([], None, indices(ejemplo)[0], unidades, ajuste))
+            # Zonas que pueden cambiar y dónde tiene que aparecer el texto nuevo
+            tam = tramo.tamano
+            y = ejemplo.y
+            x_fin_viejo = borrados[-1].bbox[2] if borrados else x_inicio
+            caja = pymupdf.Rect(x_inicio - 1, y - 1.2 * tam, max(fin_nuevo, x_fin_viejo) + 1, y + 0.45 * tam)
+            zonas.append(tuple(caja))
+            if texto.strip():
+                textos.append((texto, tuple(caja)))
+            desplazamiento = nuevo_desplazamiento
+            hasta = n_fin
+        if desplazamiento:
+            corrido = _correr_tramo(en_linea, hasta, len(en_linea), indices, flujo, desplazamiento, tramo_de,
+                                    adelantos, esperados_movidos, instr_previa, zonas_movidas)
+            if corrido is None:
+                return None
+        for x0, y, tam, x1 in zonas_movidas:
+            zonas.append(tuple(pymupdf.Rect(x0 - 1, y - 1.2 * tam, x1 + 1, y + 0.45 * tam)))
+        fin_linea = max((z[3] for z in zonas_movidas), default=0.0)
+        fin_cambios = max((z[2] for z in zonas), default=0.0)
+        if bloque.nivel == Nivel.PARRAFO and max(fin_linea, fin_cambios - 1) > x_derecho + 0.5:
+            return None          # se sale del margen: hay que reacomodar los renglones
+        contexto = bloque.lineas_del_parrafo or []
+        if bloque.nivel != Nivel.PARRAFO and len(contexto) > 1:
+            ancho_extra = max(fin_linea, fin_cambios - 1) - max(ln.bbox.x1 for ln in contexto)
+            if ancho_extra > 1:
+                avisos.append(f"El texto nuevo es {ancho_extra:.0f} pt más ancho que la línea original "
+                              "y puede salirse del margen. Para que se acomode solo, editá el párrafo entero.")
+    esperados = []
+    for k, g in enumerate(flujo.glifos):
+        if k in borrados_flujo:
+            continue
+        esperados.append((g.ucs, g.x + esperados_movidos.get(k, 0.0), g.y))
+    fuentes_nuevas = {clave_nueva: datos_nuevos} if datos_nuevos is not None else {}
+    op = EditarMinimo(bloque.pagina, reemplazos, adelantos, fuentes_nuevas, esperados, insertados, textos, zonas)
+    return PlanEdicion(op, avisos)
+
+
+def _correr_tramo(en_linea: list[Glifo], desde: int, hasta: int, indices, flujo: Flujo, desplazamiento: float,
+                  tramo_de: dict, adelantos: dict[int, float], movidos: dict[int, float], instr_previa: int,
+                  zonas_movidas: list[tuple]) -> tuple[float, int] | None:
+    """Corre los glifos [desde, hasta). Los que siguen de corrido en un operador se corren solos;
+    un operador que se posiciona por su cuenta necesita un número al comienzo. Si aparece una
+    columna, el corrimiento termina ahí. Devuelve (corrimiento final, última instrucción), o None
+    si no se puede garantizar (la línea no se dibuja de izquierda a derecha)."""
+    anterior = None
+    previo = en_linea[desde - 1] if desde > 0 else None
+    for g in en_linea[desde:hasta]:
+        k_lista = indices(g)
+        if not k_lista:
+            return None
+        m = flujo.glifos[k_lista[0]].mostrar
+        if m is None:
+            return None
+        if m.indice != instr_previa and m.reposiciona:
+            tramo = tramo_de[id(g)]
+            th = m.tz / 100
+            if not tramo.tamano or not th:
+                return None
+            if previo is not None:
+                separacion = g.x - previo.bbox[2]
+                if separacion >= GAP_COLUMNA * tramo.tamano:
+                    desplazamiento = (0.0 if desplazamiento < 0
+                                      else max(0.0, desplazamiento - (separacion - 0.25 * tramo.tamano)))
+            if desplazamiento:
+                adelantos[m.indice] = adelantos.get(m.indice, 0.0) - desplazamiento * 1000 / (tramo.tamano * th)
+        instr_previa = m.indice
+        for k in k_lista:
+            if flujo.glifos[k].mostrar is None or (anterior is not None and k <= anterior and desplazamiento):
+                return None
+            if desplazamiento:
+                movidos[k] = desplazamiento
+            anterior = k
+        if desplazamiento:
+            zonas_movidas.append((min(g.bbox[0], g.bbox[0] + desplazamiento), g.y, tramo_de[id(g)].tamano,
+                                  max(g.bbox[2], g.bbox[2] + desplazamiento)))
+        previo = g
+    return desplazamiento, instr_previa
+
+
+def _unidades(texto: str, m: Mostrar, cod: CodificadorFuente, opcion: "OpcionFuente | None",
+              otra_fuente: pymupdf.Font | None, clave_nueva: str, flujo: Flujo) -> tuple[list[Unidad], float]:
+    """Los glifos a escribir y su avance total, con el espaciado (Tc, Tw) del operador."""
+    unidades: list[Unidad] = []
+    if otra_fuente is not None:
+        for ch in texto:
+            codigo = otra_fuente.has_glyph(ord(ch))
+            if not codigo:
+                unidades.append(Unidad(None, ESPACIO_SIN_CODIGO + extra_de_espaciado(m, None)))
+                continue
+            ancho = otra_fuente.glyph_advance(ord(ch)) * 1000
+            unidades.append(Unidad(codigo.to_bytes(2, "big"), ancho + extra_de_espaciado(m, None), ancho, clave_nueva))
+        return unidades, sum(u.avance for u in unidades)
+    letras = texto.replace(" ", "")
+    fuente_xref = None
+    usar = cod
+    if not cod.puede(letras):
+        alternativa = opcion.codificador if opcion is not None else None
+        if alternativa is None or not alternativa.puede(letras):
+            faltan = cod.faltantes(letras)
+            raise Limitacion(f"La fuente original no tiene {', '.join(f'«{c}»' for c in faltan[:6])}: "
+                             "elegí otra fuente para el texto nuevo.")
+        usar, fuente_xref = alternativa, alternativa.xref
+    for ch in texto:
+        if ch == " " and " " not in usar.a_codigo:
+            unidades.append(Unidad(None, ESPACIO_SIN_CODIGO + extra_de_espaciado(m, b" ")))
+            continue
+        codigo = flujo.codigo_usado(usar.xref, ch) or usar.codigo(ch)
+        ancho = avance_codigo(usar, int.from_bytes(codigo, "big"))
+        extra = extra_de_espaciado(m, codigo if usar.bytes_por_codigo == 1 else None)
+        unidades.append(Unidad(codigo, ancho + extra, ancho, fuente_xref))
+    return unidades, sum(u.avance for u in unidades)
+
+
+def plan_de_reemplazo_puntual(doc: pymupdf.Document, pagina: int, flujo: Flujo, indices: list[int],
+                              unidades_de) -> tuple[list[Reemplazo], int] | None:
+    """Reemplazos de glifos sueltos sin correr nada (para resolver un carácter en todo el documento)."""
+    reemplazos = []
+    insertados = 0
+    cods: dict = {}
+    for k in indices:
+        glifo = flujo.glifos[k]
+        m = glifo.mostrar
+        if m is None:
+            return None
+        cod = codificador_de(doc, m.xref, cods)
+        if cod is None:
+            return None
+        unidades = unidades_de(m, cod)
+        insertados += sum(1 for u in unidades if u.codigo is not None)
+        ajuste = sum(u.avance for u in unidades) - avance_en_flujo(m, cod, glifo.codigo)
+        reemplazos.append(Reemplazo([k], None, None, unidades, ajuste))
+    return reemplazos, insertados
 
 
 # ---------------------------------------------------------------------- planificación
@@ -887,8 +1392,11 @@ class _Metrica:
         self.opcion = opcion
         self.cod = opcion.codificador if opcion.tipo == "original" else None
         self.fuente = None if self.cod is not None else opcion.fuente_pymupdf()
+        self.fijos: dict[str, float] = {}      # caracteres sin glifo: el ancho de su código original
 
     def __call__(self, token: str) -> float:
+        if token in self.fijos:
+            return self.fijos[token]
         if self.cod is not None:
             codigo = self.cod.a_codigo.get(token)
             if codigo is not None and codigo in self.cod.anchos:
@@ -955,44 +1463,62 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
 
     pag = doc[bloque.pagina]
     dx, dy = desplazamiento
+    if bloque.nivel != Nivel.PARRAFO:
+        texto_nuevo = texto_nuevo.replace("\n", " ")
+    # Lo normal: tocar solo lo que cambió
+    if not dx and not dy and texto_nuevo != bloque.texto:
+        minimo = _plan_minimo(doc, bloque, texto_nuevo, opcion, cache)
+        if minimo is not None:
+            return minimo
     avisos: list[str] = []
     rects = [_franja_borrado(ln) for ln in bloque.lineas]
+    conservados = bloque.caracteres_sin_glifo
     texto_original = bloque.texto
     lineas_dibujo: list[LineaADibujar] = []
 
     # Caso 1: mismo texto (mover). Cada tramo con su propia fuente y posiciones exactas
     if texto_nuevo == texto_original:
         todos = True
+        colas = _codigos_conservados(doc, bloque)
         for ln in bloque.lineas:
             for tr in ln.tramos:
                 cod = codificador_de_tramo(doc, pag, tr, cache)
-                if cod is None or not cod.puede(tr.texto):
+                if cod is None or not all(c in conservados for c in cod.faltantes(tr.texto)):
                     todos = False
                     break
                 tokens = []
+                crudos: dict[int, int] = {}
                 i = 0
                 for tok in tokenizar(tr.texto, cod):
+                    if tok in colas:
+                        dato = colas[tok].popleft() if colas[tok] else None
+                        if dato is not None and dato[0] == cod.xref:
+                            crudos[len(tokens)] = dato[1]
+                        elif tok not in cod.a_codigo:
+                            todos = False
                     tokens.append((tok, tr.glifos[i].x + dx))
                     i += len(tok)
                 escala = _espaciado(tr, cod)[0]
                 lineas_dibujo.append(LineaADibujar(tokens, tr.glifos[0].y + dy, tr.tamano, tr.color, tr.modo,
                                                    tr.opacidad, escala, fuente_xref=cod.xref,
-                                                   ascender=tr.ascender, descender=tr.descender))
+                                                   ascender=tr.ascender, descender=tr.descender, crudos=crudos))
             if not todos:
                 break
         if todos:
-            cajas = [tuple(ln.caja(_avance_cod(construir_codificador(doc, ln.fuente_xref, usados=set()))))
-                     for ln in lineas_dibujo]
+            cajas = []
+            for ln in lineas_dibujo:
+                avance = _avance_cod(construir_codificador(doc, ln.fuente_xref, usados=set()))
+                cajas.append(tuple(ln.caja(avance)))
             op = EditarTexto(bloque.pagina, rects, lineas_dibujo, texto_original, cajas,
                              "Mover texto" if (dx or dy) else "Reescribir texto",
-                             [_zona_borrada(ln) for ln in bloque.lineas], _objetivo(bloque))
+                             [_zona_borrada(ln) for ln in bloque.lineas], _objetivo(bloque), conservados)
             return PlanEdicion(op, avisos)
         lineas_dibujo = []
         if opcion is None:
             raise Limitacion("La fuente original no se puede reutilizar: elegí otra fuente." + explicar_sin_glifo())
         avisos.append("La fuente original no se pudo reutilizar; se usa " + opcion.nombre + ".")
 
-    if opcion is None or not opcion.disponible:
+    if opcion is None or not all(c in conservados for c in opcion.faltantes):
         raise Limitacion("La fuente elegida no tiene todos los caracteres del texto nuevo." + explicar_sin_glifo())
     estilo = bloque.estilo
     if bloque.varios_estilos:
@@ -1005,6 +1531,13 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
                              "Elegí otra opción.")
     metrica = _Metrica(opcion)
     cod_original = codificador_de_tramo(doc, pag, estilo, cache)
+    # Los caracteres sin glifo se reescriben con su código y su fuente originales, sin pedir glifo nuevo
+    colas = _codigos_conservados(doc, bloque) if any(c in texto_nuevo for c in conservados) else {}
+    for c, cola in colas.items():
+        dato = next((d for d in cola if d is not None), None)
+        origen = codificador_de(doc, dato[0], cache if cache is not None else {}) if dato is not None else None
+        if origen is not None:
+            metrica.fijos[c] = avance_codigo(origen, dato[1])
     escala, letras, palabras = _espaciado(estilo, cod_original)
     datos_fuente = None
     if opcion.tipo != "original":
@@ -1012,10 +1545,31 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
         if opcion.tipo == "sustituta":
             avisos.append(f"Se usó la fuente sustituta «{opcion.nombre}» en lugar de «{sin_prefijo(estilo.fuente)}».")
 
-    def linea(tokens_pos, y) -> LineaADibujar:
+    def linea_de_grupo(tokens_pos, y, xref, crudos) -> LineaADibujar:
         return LineaADibujar(tokens_pos, y + dy, estilo.tamano, estilo.color, estilo.modo, estilo.opacidad, escala,
-                             fuente_xref=opcion.codificador.xref if opcion.tipo == "original" else None,
-                             fuente_datos=datos_fuente, ascender=estilo.ascender, descender=estilo.descender)
+                             fuente_xref=xref, fuente_datos=None if xref is not None else datos_fuente,
+                             ascender=estilo.ascender, descender=estilo.descender, crudos=crudos)
+
+    def lineas_de(tokens_pos, y) -> list[LineaADibujar]:
+        """Una línea por cada fuente: la elegida y las originales de los caracteres sin glifo."""
+        xref_opcion = opcion.codificador.xref if opcion.tipo == "original" else None
+        grupos: list[LineaADibujar] = []
+        for tok, x in tokens_pos:
+            xref, crudo = xref_opcion, None
+            if tok in conservados and tok in colas and colas[tok]:
+                dato = colas[tok].popleft()
+                if dato is None:
+                    if not (cod_original is not None and tok in cod_original.a_codigo):
+                        raise Limitacion("No se pudo conservar un carácter sin glifo." + explicar_sin_glifo())
+                    xref = cod_original.xref
+                else:
+                    xref, crudo = dato
+            if not grupos or grupos[-1].fuente_xref != xref:
+                grupos.append(linea_de_grupo([], y, xref, {}))
+            if crudo is not None:
+                grupos[-1].crudos[len(grupos[-1].tokens)] = crudo
+            grupos[-1].tokens.append((tok, x))
+        return grupos
 
     if bloque.nivel in (Nivel.FRAGMENTO, Nivel.LINEA):
         ln = bloque.lineas[0]
@@ -1039,8 +1593,8 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
                 x0 = (ln.bbox.x0 + ln.bbox.x1) / 2 - ancho_nuevo / 2
             elif alin == "derecha":
                 x0 = ln.bbox.x1 - ancho_nuevo
-        lineas_dibujo.append(linea(_posiciones(tokens, x0 + dx, metrica, estilo.tamano, escala, letras, palabras),
-                                   ln.base_y))
+        lineas_dibujo += lineas_de(_posiciones(tokens, x0 + dx, metrica, estilo.tamano, escala, letras, palabras),
+                                   ln.base_y)
         ancho_final = _ancho(tokens, metrica, estilo.tamano, escala, letras, palabras)
         if ancho_final > ancho_orig + 1 and bloque.lineas_del_parrafo and len(bloque.lineas_del_parrafo) > 1:
             avisos.append(f"El texto nuevo es {ancho_final - ancho_orig:.0f} pt más ancho que la línea original "
@@ -1074,8 +1628,8 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
                 x0 = x_der - natural
             if natural > ancho + 0.5:
                 avisos.append(f"Una palabra no entra en el ancho del párrafo: «{texto_linea[:30]}».")
-            lineas_dibujo.append(linea(_posiciones(tokens, x0 + dx, metrica, estilo.tamano, escala, letras, extra),
-                                       bases[0] + i * paso))
+            lineas_dibujo += lineas_de(_posiciones(tokens, x0 + dx, metrica, estilo.tamano, escala, letras, extra),
+                                       bases[0] + i * paso)
         if len(partes) > len(lineas):
             avisos.append(f"El párrafo ahora ocupa {len(partes)} líneas (antes {len(lineas)}): "
                           "revisá que no se superponga con lo que sigue.")
@@ -1083,8 +1637,25 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
     cajas = [tuple(ld.caja(metrica)) for ld in lineas_dibujo]
     op = EditarTexto(bloque.pagina, rects, lineas_dibujo, texto_nuevo, cajas or [tuple(rects[0])],
                      "Mover y editar texto" if (dx or dy) else "Editar texto",
-                     [_zona_borrada(ln) for ln in bloque.lineas], _objetivo(bloque))
+                     [_zona_borrada(ln) for ln in bloque.lineas], _objetivo(bloque), conservados)
     return PlanEdicion(op, avisos)
+
+
+def _codigos_conservados(doc: pymupdf.Document, bloque: "BloqueTexto") -> dict[str, deque]:
+    """Por cada carácter sin glifo del bloque, en orden: (xref de su fuente, código original)."""
+    colas: dict[str, deque] = {}
+    conservados = bloque.caracteres_sin_glifo
+    if not conservados:
+        return colas
+    flujo = leer_flujo(doc, doc[bloque.pagina])
+    for ln in bloque.lineas:
+        for g in ln.glifos:
+            if g.c not in conservados:
+                continue
+            k = flujo.buscar(g.c, g.x, g.y) if flujo is not None else []
+            dato = (flujo.glifos[k[0]].xref, int.from_bytes(flujo.glifos[k[0]].codigo, "big")) if k else None
+            colas.setdefault(g.c, deque()).append(dato)
+    return colas
 
 
 def _avance_cod(cod: CodificadorFuente):

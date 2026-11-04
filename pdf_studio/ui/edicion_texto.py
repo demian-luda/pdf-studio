@@ -1,11 +1,12 @@
 """Diálogo para editar un bloque de texto, con análisis de fuente en vivo."""
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QTextCursor, QTextFormat
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QDialog, QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout,
                                QLabel, QPlainTextEdit, QPushButton, QRadioButton, QTextEdit, QToolButton,
                                QVBoxLayout, QWidget)
@@ -17,6 +18,72 @@ from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
 from pdf_studio.ui import iconos
 from pdf_studio.ui.comunes import tarjeta_informativa
 from pdf_studio.ui.tema import gestor, marcar_primario
+
+# Un carácter sin glifo se muestra como una marca que se borra entera o no se borra
+_MARCA = re.compile(r"\u27e6U\+([0-9A-F]{4,6})\u27e7")
+
+
+def marcar(texto: str, caracteres: set[str]) -> str:
+    return "".join(f"\u27e6U+{ord(c):04X}\u27e7" if c in caracteres else c for c in texto)
+
+
+def desmarcar(texto: str) -> str:
+    return _MARCA.sub(lambda m: chr(int(m.group(1), 16)), texto)
+
+
+class EditorConMarcas(QPlainTextEdit):
+    """Editor de texto en el que las marcas son atómicas: el cursor no entra en ellas, una
+    selección las toma enteras y Retroceso/Suprimir las borra de una vez."""
+
+    def __init__(self, texto: str, parent: QWidget | None = None):
+        super().__init__(texto, parent)
+        self.setAcceptDrops(False)      # soltar texto adentro de una marca la rompería
+        self._ultima_posicion = 0
+        self._ajustando = False
+        self.cursorPositionChanged.connect(self._ajustar_cursor)
+
+    def marcas(self) -> list[tuple[int, int]]:
+        return [m.span() for m in _MARCA.finditer(self.toPlainText())]
+
+    def _ajustar_cursor(self) -> None:
+        if self._ajustando:
+            return
+        cursor = self.textCursor()
+        ancla, pos = cursor.anchor(), cursor.position()
+        nueva_ancla, nueva_pos = ancla, pos
+        for inicio, fin in self.marcas():
+            if inicio < pos < fin:
+                if ancla == pos:
+                    # Sin selección: sigue en el sentido en que venía
+                    nueva_pos = nueva_ancla = fin if pos >= self._ultima_posicion else inicio
+                else:
+                    nueva_pos = fin if pos > ancla else inicio
+            if ancla != pos and inicio < ancla < fin:
+                nueva_ancla = inicio if pos > ancla else fin
+        if (nueva_ancla, nueva_pos) != (ancla, pos):
+            self._ajustando = True
+            cursor.setPosition(nueva_ancla)
+            cursor.setPosition(nueva_pos, QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cursor)
+            self._ajustando = False
+        self._ultima_posicion = nueva_pos
+
+    def keyPressEvent(self, evento) -> None:
+        cursor = self.textCursor()
+        if not cursor.hasSelection() and evento.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            pos = cursor.position()
+            for inicio, fin in self.marcas():
+                if (evento.key() == Qt.Key.Key_Backspace and pos == fin) or (
+                        evento.key() == Qt.Key.Key_Delete and pos == inicio):
+                    cursor.setPosition(inicio)
+                    cursor.setPosition(fin, QTextCursor.MoveMode.KeepAnchor)
+                    self._ajustando = True
+                    cursor.removeSelectedText()
+                    self._ajustando = False
+                    self._ultima_posicion = inicio
+                    return
+        super().keyPressEvent(evento)
+
 
 TEXTO_NIVEL = {Nivel.FRAGMENTO: "fragmento", Nivel.LINEA: "línea", Nivel.PARRAFO: "párrafo"}
 
@@ -39,8 +106,11 @@ def _descripcion_sin_glifo(c: CaracterSinGlifo) -> str:
 class DialogoEditarTexto(QDialog):
     def __init__(self, bloque: BloqueTexto, analizar: Callable[[str], AnalisisFuente],
                  reescanear: Callable[[], None] | None = None, parent: QWidget | None = None,
-                 instalar: Callable[[FuenteLibre], bool] | None = None):
+                 instalar: Callable[[FuenteLibre], bool] | None = None,
+                 patrones: Callable[[], list] | None = None):
         super().__init__(parent)
+        self._patrones = patrones      # los caracteres sin glifo de todo el documento (se piden una vez)
+        self.pidio_documento = False   # el usuario quiere resolverlos en todo el documento
         self.setWindowTitle(f"Editar {TEXTO_NIVEL[bloque.nivel]}")
         self.resize(640, 520 if bloque.nivel == Nivel.PARRAFO else 380)
         self.bloque = bloque
@@ -65,7 +135,7 @@ class DialogoEditarTexto(QDialog):
         self.resultado_busqueda.hide()
         # Capa de OCR invisible: aviso informativo (no es un error; se puede editar igual)
         self.aviso_invisible = tarjeta_informativa(AVISO_INVISIBLE, self) if bloque.invisible else None
-        self.editor = QPlainTextEdit(bloque.texto, self)
+        self.editor = EditorConMarcas(marcar(bloque.texto, bloque.caracteres_sin_glifo), self)
         if bloque.nivel != Nivel.PARRAFO:
             self.editor.setMaximumHeight(90)
         self.editor.textChanged.connect(lambda: self._temporizador.start())
@@ -126,18 +196,29 @@ class DialogoEditarTexto(QDialog):
         self.boton_quitar_caracter = QPushButton("Quitar", self.tarjeta_sin_glifo)
         iconos.asignar(self.boton_quitar_caracter, "eraser")
         self.boton_quitar_caracter.clicked.connect(lambda: self._resolver_sin_glifo(""))
+        self.boton_todo_documento = QPushButton("En todo el documento…", self.tarjeta_sin_glifo)
+        iconos.asignar(self.boton_todo_documento, "file-text")
+        self.boton_todo_documento.setToolTip("Ver cuántas veces aparece y qué hacer con todas juntas")
+        self.boton_todo_documento.clicked.connect(self._pedir_documento)
+        self.boton_todo_documento.hide()
+        self.etiqueta_patron = QLabel("", self.tarjeta_sin_glifo)
+        self.etiqueta_patron.setObjectName("texto_suave")
+        self.etiqueta_patron.setWordWrap(True)
+        self.etiqueta_patron.hide()
         fila = QHBoxLayout()
         fila.addWidget(self.boton_reemplazar_espacio)
         fila.addWidget(self.boton_quitar_caracter)
         fila.addStretch(1)
+        fila.addWidget(self.boton_todo_documento)
         capa.addWidget(self.etiqueta_sin_glifo)
+        capa.addWidget(self.etiqueta_patron)
         capa.addLayout(fila)
         self.tarjeta_sin_glifo.hide()
 
     # ------------------------------------------------------------------ datos
     @property
     def texto(self) -> str:
-        return self.editor.toPlainText()
+        return desmarcar(self.editor.toPlainText())
 
     def opcion_elegida(self) -> OpcionFuente | None:
         boton = self.botones_opciones.checkedButton()
@@ -213,25 +294,46 @@ class DialogoEditarTexto(QDialog):
         if self.sin_glifo:
             n = len(self.sin_glifo)
             titulo = "Hay un carácter sin glifo en el texto" if n == 1 else f"Hay {n} caracteres sin glifo en el texto"
-            self.etiqueta_sin_glifo.setText(f"<b>{titulo}.</b><br>"
+            self.etiqueta_sin_glifo.setText(f"<b>{titulo}.</b> Si no lo tocás, se conserva con su código y su "
+                                            "fuente originales.<br>"
                                             + "<br>".join(_descripcion_sin_glifo(c) for c in self.sin_glifo))
-            color = QColor(gestor().paleta.aviso)
-            color.setAlpha(90)
-            for c in self.sin_glifo:
-                for posicion in c.posiciones:
-                    marca = QTextEdit.ExtraSelection()
-                    marca.format.setBackground(color)
-                    marca.format.setProperty(QTextFormat.Property.FullWidthSelection, False)
-                    marca.cursor = QTextCursor(self.editor.document())
-                    marca.cursor.setPosition(posicion - 1)
-                    marca.cursor.setPosition(posicion, QTextCursor.MoveMode.KeepAnchor)
-                    marcas.append(marca)
+            self._mostrar_patron()
+        color = QColor(gestor().paleta.aviso)
+        color.setAlpha(90)
+        for inicio, fin in self.editor.marcas():
+            marca = QTextEdit.ExtraSelection()
+            marca.format.setBackground(color)
+            marca.format.setFontWeight(QFont.Weight.DemiBold)
+            marca.format.setProperty(QTextFormat.Property.FullWidthSelection, False)
+            marca.cursor = QTextCursor(self.editor.document())
+            marca.cursor.setPosition(inicio)
+            marca.cursor.setPosition(fin, QTextCursor.MoveMode.KeepAnchor)
+            marcas.append(marca)
         self.editor.setExtraSelections(marcas)
 
+    def _mostrar_patron(self) -> None:
+        """Si el carácter se repite en el documento, cuántas veces y en qué contexto."""
+        if self._patrones is None:
+            return
+        if not hasattr(self, "_inventario"):
+            try:
+                self._inventario = self._patrones()
+            except Exception:
+                self._inventario = []     # es información adicional: no frena la edición
+        presentes = {c.caracter for c in self.sin_glifo}
+        lineas = [p.resumen() + "." for p in self._inventario if p.caracter in presentes]
+        self.etiqueta_patron.setText("<br>".join(lineas))
+        self.etiqueta_patron.setVisible(bool(lineas))
+        self.boton_todo_documento.setVisible(bool(lineas))
+
+    def _pedir_documento(self) -> None:
+        self.pidio_documento = True
+        self.reject()
+
     def _resolver_sin_glifo(self, reemplazo: str) -> None:
-        texto = self.texto
+        texto = self.editor.toPlainText()
         for c in self.sin_glifo:
-            texto = texto.replace(c.caracter, reemplazo)
+            texto = texto.replace(f"\u27e6{c.codigo}\u27e7", reemplazo).replace(c.caracter, reemplazo)
         # Con el cursor, y no con setPlainText, para que Ctrl+Z del editor lo pueda deshacer
         cursor = QTextCursor(self.editor.document())
         cursor.select(QTextCursor.SelectionType.Document)

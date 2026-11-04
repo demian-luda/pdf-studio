@@ -9,6 +9,8 @@ Cada PDF tiene una línea con la fuente especial y otra en Helvetica:
 - cid_cidtogid.pdf      CIDFontType2 con /CIDToGIDMap en stream y sin /ToUnicode
 - quicksand_sin_glifo.pdf  Subconjunto de Quicksand-Bold con dos códigos que dibujan .notdef:
                         uno mapeado a U+E123 y otro sin /ToUnicode (se extrae como U+FFFD)
+- lista_word_simbolo.pdf  Lista numerada como la exporta Word: cada ítem tiene un carácter de una
+                        fuente de símbolos que no tiene ese glifo (U+F0B7), en su propio operador
 
 Las fuentes salen de Liberation Sans o Quicksand (OFL) o se construyen acá; los textos son ficticios.
 """
@@ -337,10 +339,84 @@ def quicksand_sin_glifo(salida: Path) -> None:
     _guardar(doc, pag, fuente, contenido, salida)
 
 
+# ---------------------------------------------------------------------- lista numerada de Word
+ITEMS_LISTA = ("1.", "Primer punto de la lista", "2.", "Segundo punto de la lista", "3.", "Tercer punto de la lista")
+CODIGO_SIMBOLO = 0xB7       # el código que Word usa para la viñeta de Symbol
+
+
+def lista_word_simbolo(salida: Path) -> None:
+    """Como exporta Word: un operador por fragmento, posicionado con Td; números en una fuente,
+    el símbolo en otra (TrueType simple sin ese glifo) y kerning en los TJ."""
+    from pdf_studio.core.texto import subconjunto
+    letras = sorted({c for t in ITEMS_LISTA for c in t} | set(" "))
+    f = TTFont(io.BytesIO(subconjunto(FUENTE_BASE.read_bytes(), "".join(letras))))
+    cmap, orden, upem = f.getBestCmap(), f.getGlyphOrder(), f["head"].unitsPerEm
+    gid = {c: orden.index(cmap[ord(c)]) for c in letras}
+    ancho = {c: round(f["hmtx"][cmap[ord(c)]][0] * 1000 / upem) for c in letras}
+    buf = io.BytesIO()
+    f.save(buf)
+    doc, pag = _documento()
+
+    def cmap_a_unicode(pares: dict[int, int], digitos: int) -> bytes:
+        lineas = ["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap", "1 begincodespacerange",
+                  f"<{'0' * digitos}> <{'F' * digitos}>", "endcodespacerange", f"{len(pares)} beginbfchar"]
+        lineas += [f"<{c:0{digitos}X}> <{u:04X}>" for c, u in pares.items()]
+        return "\n".join(lineas + ["endbfchar", "endcmap", "end", "end"]).encode("ascii")
+
+    # Fuente del texto: subconjunto CID con identidad (CID = glifo)
+    archivo = _stream(doc, buf.getvalue(), f"<</Length1 {len(buf.getvalue())}>>")
+    desc = _objeto(doc, "<</Type/FontDescriptor/FontName/WORDAB+ArialMT/Flags 32/FontBBox[-200 -250 1100 950]"
+                        f"/ItalicAngle 0/Ascent 905/Descent -212/CapHeight 716/StemV 80/FontFile2 {archivo} 0 R>>")
+    w = " ".join(f"{gid[c]} [{ancho[c]}]" for c in letras)
+    hija = _objeto(doc, "<</Type/Font/Subtype/CIDFontType2/BaseFont/WORDAB+ArialMT"
+                        "/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
+                        f"/FontDescriptor {desc} 0 R/W[{w}]/CIDToGIDMap/Identity>>")
+    uni = _stream(doc, cmap_a_unicode({gid[c]: ord(c) for c in letras}, 4))
+    texto = _objeto(doc, f"<</Type/Font/Subtype/Type0/BaseFont/WORDAB+ArialMT/Encoding/Identity-H"
+                         f"/DescendantFonts[{hija} 0 R]/ToUnicode {uni} 0 R>>")
+    # Fuente de símbolos: subconjunto recortado que no trae el glifo del código B7
+    simbolo_f = TTFont(io.BytesIO(subconjunto(FUENTE_BASE.read_bytes(), "x")))
+    tabla = CmapSubtable.newSubtable(4)
+    tabla.platformID, tabla.platEncID, tabla.language = 3, 0, 0
+    tabla.cmap = {0xF078: simbolo_f.getBestCmap()[ord("x")]}
+    simbolo_f["cmap"].tables = [tabla]
+    buf2 = io.BytesIO()
+    simbolo_f.save(buf2)
+    archivo2 = _stream(doc, buf2.getvalue(), f"<</Length1 {len(buf2.getvalue())}>>")
+    desc2 = _objeto(doc, "<</Type/FontDescriptor/FontName/WORDCD+SymbolMT/Flags 4/FontBBox[0 -200 1000 900]"
+                         f"/ItalicAngle 0/Ascent 900/Descent -200/CapHeight 700/StemV 80/FontFile2 {archivo2} 0 R>>")
+    uni2 = _stream(doc, cmap_a_unicode({CODIGO_SIMBOLO: 0xF0B7}, 2))
+    simbolo = _objeto(doc, f"<</Type/Font/Subtype/TrueType/BaseFont/WORDCD+SymbolMT/FirstChar {CODIGO_SIMBOLO}"
+                           f"/LastChar {CODIGO_SIMBOLO}/Widths[600]/FontDescriptor {desc2} 0 R/ToUnicode {uni2} 0 R>>")
+    t, v = doc.xref_get_key(pag.xref, "Resources")
+    contenedor, prefijo = (int(v.split()[0]), "") if t == "xref" else (pag.xref, "Resources/")
+    doc.xref_set_key(contenedor, f"{prefijo}Font/SY", f"{simbolo} 0 R")
+
+    def tj(cadena: str) -> bytes:
+        # Con un ajuste de kerning en el medio, como hace Word
+        partes = [cadena[:3], cadena[3:]]
+        hexa = [b"<" + "".join(f"{gid[c]:04x}" for c in p).encode() + b">" for p in partes if p]
+        return b"[" + b" 12 ".join(hexa) + b"] TJ"
+
+    contenido = bytearray()
+    y = 120
+    for i in range(0, len(ITEMS_LISTA), 2):
+        numero, item = ITEMS_LISTA[i], ITEMS_LISTA[i + 1]
+        x = 40.0
+        contenido += b"BT /FX 12 Tf %.2f %d Td " % (x, y) + tj(numero) + b" ET\n"
+        x += sum(ancho[c] for c in numero) * 12 / 1000
+        contenido += b"BT /SY 12 Tf %.2f %d Td <%02x> Tj ET\n" % (x, y, CODIGO_SIMBOLO)
+        x += 600 * 12 / 1000 + 6
+        contenido += b"BT /FX 12 Tf %.2f %d Td " % (x, y) + tj(item) + b" ET\n"
+        y -= 30
+    _guardar(doc, pag, texto, bytes(contenido), salida)
+
+
 GENERADORES = {
     "cff_type1c.pdf": cff_type1c, "type1.pdf": type1, "type3.pdf": type3,
     "truetype_sin_cmap.pdf": truetype_sin_cmap, "truetype_simbolica.pdf": truetype_simbolica,
     "cid_cidtogid.pdf": cid_cidtogid, "quicksand_sin_glifo.pdf": quicksand_sin_glifo,
+    "lista_word_simbolo.pdf": lista_word_simbolo,
 }
 
 

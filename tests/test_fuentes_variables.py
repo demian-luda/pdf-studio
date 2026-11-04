@@ -17,7 +17,8 @@ from pdf_studio.core.fuentes import (Clase, Embebido, IndiceFuentesSistema, _anc
                                      analizar_fuentes, bytes_de_fuente, clase_tipografica, clave_fuente,
                                      es_no_dibujable, instanciar_variable)
 from pdf_studio.core.sustitucion import candidatas, familias_del_documento
-from pdf_studio.core.texto import (MotivoSinGlifo, Nivel, analizar_fuente, bloque_en, lineas_de_pagina,
+from pdf_studio.core.texto import (MotivoSinGlifo, Nivel, analizar_edicion, analizar_fuente, bloque_en,
+                                   lineas_de_pagina,
                                    localizar_sin_glifo, planificar)
 from pdf_studio.ui.edicion_texto import DialogoEditarTexto
 from tests.fuentes_sinteticas import DESTINO, QUICKSAND_VARIABLE, quicksand_sin_glifo
@@ -261,7 +262,7 @@ def test_recargar_que_falla_conserva_el_indice(instalada, monkeypatch):
 
 
 def _dialogo(doc, bloque, indice, incluidas, reescanear, qtbot, instalar=None):
-    dialogo = DialogoEditarTexto(bloque, lambda t: analizar_fuente(doc, doc[0], bloque.estilo, t, indice, incluidas),
+    dialogo = DialogoEditarTexto(bloque, lambda t: analizar_edicion(doc, doc[0], bloque, t, indice, incluidas),
                                  reescanear=reescanear, instalar=instalar)
     qtbot.addWidget(dialogo)
     # El test llama a actualizar(): que el temporizador no dispare con el PDF ya cerrado
@@ -478,18 +479,15 @@ def test_dialogo_muestra_y_resuelve(punto, codigo, posicion, boton, reemplazo, i
         assert dialogo.opcion_elegida() is not None
 
 
-def test_dialogo_sin_ninguna_fuente_no_queda_en_un_callejon(incluidas, tmp_path, carpeta, qtbot):
-    """Con U+FFFD ninguna opción sirve: Aplicar se apaga hasta resolverlo, y se ofrece cómo."""
+def test_dialogo_con_caracter_sin_glifo_no_bloquea(incluidas, tmp_path, carpeta, qtbot):
+    """Lo que no cambia no pide glifo: Aplicar sigue activo sin tener que resolver nada."""
     vacio = IndiceFuentesSistema([carpeta], tmp_path / "c.json")
     with pymupdf.open(PDF) as doc:
         bloque = bloque_en(doc[0], 0, PUNTO_SIN_MAPA, Nivel.LINEA)
         dialogo = _dialogo(doc, bloque, vacio, incluidas, vacio.recargar, qtbot)
-        aplicar = dialogo.botones.button(dialogo.botones.StandardButton.Ok)
-        assert not aplicar.isEnabled()
+        assert dialogo.botones.button(dialogo.botones.StandardButton.Ok).isEnabled()
         assert not dialogo.tarjeta_sin_glifo.isHidden()
-        dialogo.boton_quitar_caracter.click()
-        assert aplicar.isEnabled() and "�" not in dialogo.texto
-        assert dialogo.opcion_elegida().tipo == "original"   # sin el raro, la original alcanza
+        assert dialogo.opcion_elegida().tipo == "original"
 
 
 def test_deshacer_del_editor_recupera_el_caracter(incluidas, instalada, qtbot):
@@ -549,14 +547,14 @@ def test_mover_el_cuadradito_mapeado_funciona(incluidas, tmp_path):
     assert "Hola" in documento.doc[0].get_text()
 
 
-def test_mover_con_codigo_sin_mapa_explica_que_hacer(incluidas, tmp_path, carpeta):
-    vacio = IndiceFuentesSistema([carpeta], tmp_path / "c.json")
-    with pymupdf.open(PDF) as doc:
-        bloque = bloque_en(doc[0], 0, PUNTO_SIN_MAPA, Nivel.LINEA)
-        opcion = analizar_fuente(doc, doc[0], bloque.estilo, bloque.texto, vacio, incluidas).recomendada
-        assert opcion is None
-        with pytest.raises(Limitacion, match=r"U\+FFFD, posición 7.*F2"):
-            planificar(doc, bloque, bloque.texto, opcion, (0.0, 12.0))
+def test_mover_con_codigo_sin_mapa_conserva_el_codigo(tmp_path):
+    """Antes se rechazaba: ahora se mueve con el código original, que sale del contenido."""
+    copia = tmp_path / "doc.pdf"
+    shutil.copy2(PDF, copia)
+    documento = Documento(copia)
+    bloque = bloque_en(documento.doc[0], 0, PUNTO_SIN_MAPA, Nivel.LINEA)
+    documento.ejecutar(planificar(documento.doc, bloque, bloque.texto, None, (0.0, 12.0)).operacion)
+    assert b"00c9" in documento.doc[0].read_contents().lower()
 
 
 def test_sustitucion_global_omite_lo_que_no_se_puede_dibujar(incluidas):

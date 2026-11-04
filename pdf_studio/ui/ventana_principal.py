@@ -39,7 +39,8 @@ from pdf_studio.core.paginas import (EliminarPaginas, FuentePDF, InsertarDesdePD
                                      nombres_libres)
 from pdf_studio import procesos
 from pdf_studio.core.sustitucion import PlanSustitucion
-from pdf_studio.core.texto import (AVISO_INVISIBLE, BloqueTexto, Nivel, OpcionFuente, analizar_fuente, bloque_en,
+from pdf_studio.core.sin_glifo import inventario as inventario_sin_glifo, planificar_resolucion
+from pdf_studio.core.texto import (AVISO_INVISIBLE, BloqueTexto, Nivel, OpcionFuente, analizar_edicion, bloque_en,
                                    planificar)
 from pdf_studio.dependencias.chequeo import Faltante, Importancia, chequear_inicio, faltantes_de_fuentes
 from pdf_studio.dependencias.instalador import Instalacion, instalacion_fuente
@@ -353,6 +354,10 @@ class VentanaPrincipal(QMainWindow):
 
         self.acc_sustituir = self._accion("Reemplazar fuente…", "replace", None, lambda: self.sustituir_fuentes(),
                                           grupo=H, tip="Modo armónico: reemplaza una fuente en todo el documento.")
+        self.acc_sin_glifo = self._accion("Caracteres sin glifo…", "square-dashed", None, self.resolver_sin_glifo,
+                                          grupo=H, corto="Sin glifo",
+                                          tip="Los que el PDF muestra como un rectángulo: cuántos hay y qué hacer "
+                                              "con ellos en todo el documento.")
         self.acc_ocr = self._accion("Reconocer texto (OCR)…", "scan-text", "Ctrl+Shift+O", self.reconocer_texto,
                                     grupo=H, tip="Hace buscable y copiable el texto de páginas escaneadas.")
         self.acc_importar_fotos = self._accion(
@@ -432,7 +437,7 @@ class VentanaPrincipal(QMainWindow):
         self.combo_nivel.setAccessibleName("Nivel de selección de texto")
         editar.addWidget(self.combo_nivel)
         for a in (self.acc_editar_seleccion, None, self.acc_modo_resaltar, self.acc_modo_nota, None,
-                  self.acc_sustituir, None, self.acc_modo_redactar, self.acc_buscar_redactar,
+                  self.acc_sustituir, self.acc_sin_glifo, None, self.acc_modo_redactar, self.acc_buscar_redactar,
                   self.acc_aplicar_redaccion, None, self.acc_formulario, self.acc_aplanar):
             editar.addSeparator() if a is None else editar.addAction(a)
         firmar = enc.agregar_pestana("Firmar")
@@ -567,10 +572,19 @@ class VentanaPrincipal(QMainWindow):
     def _dialogo_editar_texto(self, bloque: BloqueTexto) -> tuple[str, OpcionFuente] | None:
         dialogo = DialogoEditarTexto(bloque, lambda texto: self._analizar(bloque, texto),
                                      self._reescanear_fuentes, self,
-                                     instalar=lambda fuente: self.instalar(instalacion_fuente(fuente)))
+                                     instalar=lambda fuente: self.instalar(instalacion_fuente(fuente)),
+                                     patrones=lambda: inventario_sin_glifo(self.documento.doc))
         if dialogo.exec() and dialogo.opcion_elegida() is not None:
             return dialogo.texto, dialogo.opcion_elegida()
+        if dialogo.pidio_documento:
+            QTimer.singleShot(0, self.resolver_sin_glifo)
         return None
+
+    def _dialogo_sin_glifo(self, patrones: list):
+        """El plan elegido, o None si se canceló."""
+        from pdf_studio.ui.sin_glifo import DialogoSinGlifo
+        dialogo = DialogoSinGlifo(self.documento.doc, patrones, indice_incluidas(), self)
+        return dialogo.plan if dialogo.exec() else None
 
     def _dialogo_sustitucion(self, preseleccion: str | None) -> PlanSustitucion | None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -2189,6 +2203,33 @@ class VentanaPrincipal(QMainWindow):
         self._chequear_fuentes_documento()
         return True
 
+    def resolver_sin_glifo(self) -> bool:
+        """Los caracteres sin glifo de todo el documento: cuántos hay y qué hacer con ellos."""
+        if self.documento is None:
+            return False
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            patrones = inventario_sin_glifo(self.documento.doc)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not patrones:
+            self._informar("Caracteres sin glifo", "Este documento no tiene caracteres sin glifo.")
+            return False
+        plan = self._dialogo_sin_glifo(patrones)
+        if plan is None or plan.operacion is None:
+            return False
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.documento.ejecutar(plan.operacion)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ErrorDocumento as e:
+            self._informar_error("Caracteres sin glifo", e)
+            return False
+        self.statusBar().showMessage(plan.operacion.descripcion() + ": listo.", 5000)
+        return True
+
     # ------------------------------------------------------------------ edición de texto
     @property
     def nivel_texto(self) -> str:
@@ -2196,8 +2237,8 @@ class VentanaPrincipal(QMainWindow):
 
     def _analizar(self, bloque: BloqueTexto, texto: str):
         doc = self.documento.doc
-        return analizar_fuente(doc, doc[bloque.pagina], bloque.estilo, texto, indice_sistema(),
-                               indice_incluidas(), self._cache_fuentes)
+        return analizar_edicion(doc, doc[bloque.pagina], bloque, texto, indice_sistema(),
+                                indice_incluidas(), self._cache_fuentes)
 
     def seleccionar_texto(self, pagina: int, punto) -> BloqueTexto | None:
         if self.documento is None:
@@ -2242,6 +2283,9 @@ class VentanaPrincipal(QMainWindow):
 
     def _aplicar_plan(self, bloque: BloqueTexto, texto: str, opcion: OpcionFuente | None,
                       desplazamiento: tuple[float, float]) -> bool:
+        if texto == bloque.texto and not any(desplazamiento):
+            self.statusBar().showMessage("El texto no cambió: no se tocó nada.", 4000)
+            return False
         try:
             # Puede tardar unos segundos si hay que generar la instancia de una fuente variable
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -2418,6 +2462,7 @@ class VentanaPrincipal(QMainWindow):
                   self.acc_alejar, self.acc_zoom_real, self.acc_ajustar_ancho, self.acc_ajustar_pagina,
                   self.acc_modo_resaltar, self.acc_modo_nota, self.acc_pag_ant, self.acc_pag_sig,
                   self.acc_insertar_imagen, self.acc_modo_texto, self.acc_editar_seleccion, self.acc_sustituir,
+                  self.acc_sin_glifo,
                   self.acc_ocr, self.acc_eliminar_paginas, self.acc_insertar_blanco, self.acc_insertar_pdf,
                   self.acc_extraer, self.acc_separar, self.acc_marca_agua, self.acc_numerar, self.acc_comprimir,
                   self.acc_subir_pagina, self.acc_bajar_pagina, self.acc_modo_redactar, self.acc_buscar_redactar,
