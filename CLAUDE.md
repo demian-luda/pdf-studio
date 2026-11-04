@@ -4,6 +4,8 @@
 
 Aplicación de escritorio para Windows, de uso personal y para amigos, siempre gratuita y de código abierto (licencia AGPL-3.0, compatible con PyMuPDF). El usuario programa en Python y ya hizo apps con PyQt.
 
+Estado: las 11 fases iniciales están terminadas y hay versiones publicadas (ver «Versiones y publicación»). Lo nuevo entra como mejora o corrección, no como fase.
+
 Idioma de la interfaz: **español rioplatense**. Comentarios del código en español.
 
 ## Entorno del usuario
@@ -14,13 +16,14 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
   - Activar: `.\.venv\Scripts\Activate.ps1`. Si PowerShell bloquea scripts: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
   - Instalar siempre con `python -m pip install ...` estando el `.venv` activo.
   - Si alguna dependencia no tiene soporte para 3.13, avisar antes de cambiar de versión de Python.
+- Ejecutar desde el código: `python -m pdf_studio`. La copia instalada está en `%LOCALAPPDATA%\Programs\PDF Studio` y no cambia con el código.
 - Git ya está configurado, con un repo en GitHub (rama `main`, remoto `origin`).
 - winget está disponible.
 
 ## Flujo con Git
 
-- Al terminar cada fase, cuando el usuario la apruebe: `git add -A`, luego `git commit -m "Fase N: <resumen>"` y `git push`.
-- Para cambios riesgosos dentro de una fase, trabajar en una rama (`fase-N-...`) y fusionarla al aprobarse.
+- Al terminar un cambio, cuando el usuario lo apruebe: `git add -A`, luego `git commit -m "<resumen>"` y `git push`.
+- Para cambios riesgosos, trabajar en una rama y fusionarla al aprobarse.
 - Nunca commitear `.venv`, PDFs personales del usuario, certificados (.pfx/.p12) ni firmas de `%APPDATA%`. Los PDFs de `tests/pdfs_prueba/` se commitean solo si son de ejemplo y no tienen datos reales.
 
 ## Principios innegociables
@@ -36,40 +39,51 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
 
 | Uso | Librería |
 |---|---|
-| Interfaz | PySide6 (o PyQt5 si ya está instalado; elegir uno y mantenerlo) |
+| Interfaz | PySide6 |
 | Motor PDF (render, texto, imágenes, redacción, formularios) | PyMuPDF (`pymupdf`) |
 | Guardados seguros / estructura | `pikepdf` |
 | OCR | `ocrmypdf` + Tesseract (idiomas `spa` + `eng`) |
 | Firma digital con certificado | `pyHanko` |
 | Imágenes (quitar fondo de firmas) | `Pillow`, `numpy` |
-| Empaquetado | `PyInstaller` (un .exe para compartir) |
+| Análisis de fuentes e instancias variables | `fontTools` |
+| Fotos y escaneados a documento editable | `opencv-python-headless`, `python-docx`, `spylls` (corrector) |
+| Empaquetado | `PyInstaller`, en modo carpeta (ZIP con instalador) |
 
-Usar un entorno virtual (`.venv`) y un `requirements.txt` con versiones fijadas.
+Usar un entorno virtual (`.venv`). Versiones fijadas en `requirements.txt` (desarrollo) y `requirements-empaquetado.txt` (lo que arma el workflow).
 
-## Arquitectura sugerida
+## Arquitectura
 
 ```
 pdf_studio/
-  app.py                  # punto de entrada
-  ui/                     # ventanas, paneles, visor, miniaturas
+  app.py                  # punto de entrada (también procesos auxiliares: --tarea, --ocrmypdf, --autoprueba)
+  autoprueba.py           # prueba el .exe armado, sin interfaz
+  config.py, procesos.py, analisis_proceso.py
+  ui/                     # ventanas, paneles, visor, miniaturas, diálogos, tema, íconos, cinta
   core/
     documento.py          # abrir/guardar, historial deshacer/rehacer
-    texto.py              # edición y movimiento de texto
-    fuentes.py            # análisis de fuentes, sustitución
-    imagenes.py           # insertar imágenes y firmas
-    paginas.py            # unir, separar, rotar, reordenar
-    ocr.py
-    redaccion.py
-    formularios.py
-    comparar.py
-    firma_digital.py
-    comprimir.py
-    lotes.py
+    fidelidad.py          # comparación de píxeles
+    pdfutil.py            # objetos y recursos del PDF
+    texto.py              # edición y movimiento de texto: diff y planificación
+    cirugia.py            # edición mínima: cambia glifos sueltos en los operadores Tj/TJ
+    sin_glifo.py          # caracteres sin glifo en todo el documento
+    codificacion.py       # cómo escribir con una fuente que ya está en el PDF
+    fuentes.py            # índice de fuentes, instancias variables, clase tipográfica
+    sustitucion.py        # reemplazar fuente en todo el documento
+    imagenes.py, anotaciones.py, marcas.py, paginas.py, rangos.py, comprimir.py
+    ocr.py, reconstruccion.py, redaccion.py, formularios.py, comparar.py
+    escaneo.py, conversion.py, maquetado.py, exportar_editable.py, ortografia.py
+    firma_digital.py, lotes.py
   dependencias/
     chequeo.py            # detector de dependencias + comandos PowerShell
     instalador.py         # instalación asistida (con confirmación)
-  tests/
-    pdfs_prueba/          # PDFs de ejemplo variados
+    catalogo_fuentes.py   # fuentes libres (Google Fonts y archivos oficiales) y comerciales
+  recursos/               # íconos Lucide, fuentes incluidas, diccionarios, logo
+instalador/               # instalar.ps1, desinstalar.ps1, Instalar.cmd
+herramientas/             # empaquetar.py, generar_iconos_app.py, catálogo de Google Fonts
+tests/
+  pdfs_prueba/            # PDFs de ejemplo sin datos reales (fuentes/: casos difíciles sintéticos)
+  fuentes_prueba/         # fuente variable libre para las pruebas (Quicksand, OFL)
+.github/workflows/release.yml   # arma y publica cada versión
 ```
 
 ## Detector de dependencias (pieza central)
@@ -80,20 +94,48 @@ Se ejecuta al iniciar la app y al abrir cada PDF. Muestra un panel "Faltantes" c
 
 Casos a cubrir:
 - **Paquetes de Python faltantes** → `pip install <paquete>` (usando el pip del .venv).
-- **Tesseract** → comando `winget`. **Verificar el ID real con `winget search tesseract` antes de hardcodearlo** (esperado: `UB-Mannheim.TesseractOCR`). Incluir también el comando para descargar `spa.traineddata` a la carpeta tessdata con `Invoke-WebRequest`.
-- **Ghostscript** (opcional, para compresión agresiva) → comando `winget`; verificar el ID con `winget search ghostscript`.
-- **Fuentes**: por cada fuente del PDF, informar si está **embebida completa**, **embebida como subconjunto** (recortada) o **no embebida**, y si está instalada en Windows.
+- **Tesseract** → comando `winget` con el ID `tesseract-ocr.tesseract` (verificado en octubre de 2026; volver a verificar con `winget search tesseract` si se cambia). Incluir también el comando para descargar `spa.traineddata` a la carpeta tessdata con `Invoke-WebRequest`.
+- **Ghostscript** (opcional, para compresión agresiva) → no está en winget: se baja el instalador oficial de la última versión.
+- **Fuentes**: por cada fuente del PDF, informar si está **embebida completa**, **embebida como subconjunto** (recortada) o **no embebida**, y si está instalada en Windows. Un subconjunto se detecta también por su cobertura real de glifos, aunque no tenga el prefijo `ABCDEF+`.
   - Si es una fuente libre (Google Fonts u otras de licencia abierta): generar un comando de PowerShell que la descargue e instale para el usuario actual (`%LOCALAPPDATA%\Microsoft\Windows\Fonts` + registro en `HKCU`), sin pedir permisos de administrador.
   - Si es una fuente comercial o desconocida: no inventar descargas; ofrecer la sustitución (ver abajo).
+  - Refrescar sin reiniciar: «Ya la instalé» y los botones de refrescar llaman a `IndiceFuentesSistema.recargar()`, que ignora la caché en disco, vuelve a leer las carpetas y dice qué encontró.
 
 ## Edición de texto
 
-- Seleccionar un bloque de texto (span/línea/párrafo) y **editarlo** o **moverlo** arrastrando.
-- Técnica: redactar (borrar) solo el área del texto original **sin tocar imágenes ni gráficos de fondo** (`apply_redactions(images=PDF_REDACT_IMAGE_NONE, graphics=...)` con cuidado), y reinsertar el texto con la misma fuente, tamaño, color y posición de la línea base.
+### Edición mínima (`core/cirugia.py`)
+
+- Seleccionar un bloque de texto (fragmento, línea o párrafo) y **editarlo** o **moverlo** arrastrando.
+- Se hace un diff entre el texto original y el editado (`cambios_de_texto`) y se reescriben **solo los tramos que cambiaron**. No se usa la redacción de MuPDF, porque corre las letras que siguen a lo borrado, ni se dibuja el texto nuevo al final del contenido, porque rompe el orden de lectura (buscar y copiar).
+- `leer_flujo` alinea el contenido de la página con la traza de MuPDF: el glifo k de la traza es el código k del recorrido. Cada glifo queda ubicado en su operador Tj/TJ, con su código exacto. Si las cuentas no coinciden, devuelve None.
+- Los glifos que no cambian quedan intactos (mismos códigos, fuente y posición). Los borrados se reemplazan por un ajuste numérico del TJ que conserva el avance. El texto nuevo va en el mismo lugar del contenido, con el estado de texto que ya rige; si lleva otra fuente, se cambia con `Tf` y se vuelve a la original.
+- Al escribir un carácter se reutiliza el código con el que la página ya lo dibuja (`Flujo.codigo_usado`). Con una fuente nueva, la compensación usa los anchos que realmente quedaron en el PDF, que están redondeados.
+- **Excepción acordada a «mismas posiciones»:** si el texto nuevo no entra o deja un hueco de más de 0,3 em (`HUECO_TOLERADO`), lo que sigue en la línea se corre lo justo, con sus mismos códigos y fuente, sin cruzar columnas (`GAP_COLUMNA`). Un hueco mayor partiría la línea al extraer el texto.
+- La operación (`EditarMinimo`) declara solo las zonas tocadas y verifica que todos los demás glifos sigan en su lugar. Si no, no se aplica.
+- **Método anterior** (`EditarTexto`: redacción sin tocar imágenes ni gráficos, y texto dibujado aparte): solo para mover texto, para reacomodar los renglones de un párrafo que se sale del margen y para texto dentro de Form XObject, o cuando `leer_flujo` no alinea.
+
+### Elección de la fuente
+
+- Solo importa lo que se dibuja de nuevo (`analizar_edicion`): lo que no cambia no puede bloquear la edición.
 - Si la fuente embebida está recortada y faltan letras para el texto nuevo:
   1. Usar la fuente completa instalada en el sistema, si existe.
   2. Si no, ofrecer instalarla (detector de dependencias).
-  3. Si no es posible, ofrecer la sustitución.
+  3. Si no es posible, ofrecer la sustitución, siempre de la misma clase (sans, serif o mono), peso y estilo.
+- Con otra fuente se cambia la palabra entera, para no mezclar dos fuentes dentro de una palabra.
+- Un código con ancho 0 en `/Widths` no cuenta como disponible: es un código que el subconjunto no usa.
+- **Clase tipográfica** (`clase_tipografica`), en orden de confianza: nombre de la familia, lo que declara el programa de fuente (ancho fijo, PANOSE), la forma real de los glifos (relación entre el pie y el asta) y, por último, los flags. Los flags valen poco: MuPDF marca como serif a casi toda fuente que no se declare sans.
+
+### Fuentes variables
+
+- El índice guarda una entrada por instancia (`FuenteSistema.variacion`): «Quicksand-Bold» es `Quicksand.ttf` con `wght=700`. Fuentes, de mayor a menor autoridad: instancias con nombre de `fvar`, pesos de `STAT` y pesos estándar dentro del rango del eje. No se inventan pesos fuera del rango ni cursivas que el archivo no tenga, y si también está la versión estática, se prefiere esa.
+- Al escribir se genera la instancia estática (`instanciar_variable`) con su propio nombre interno y se embebe recortada. Puede tardar unos segundos con fuentes grandes, así que se hace recién al aplicar; para ver qué letras cubre alcanza con el archivo variable.
+- La conversión a Word y PDF editable usa archivos tal cual: ignora las variables.
+
+### Caracteres sin glifo
+
+- Son los que el PDF muestra como un rectángulo `.notdef`. Muy común en listas exportadas desde Word, a menudo después de un número. Se detectan por posición con la traza (glifo 0) y se excluyen los espacios. Un código sin mapa se lee como U+FFFD (sin `TEXT_CID_FOR_UNKNOWN_UNICODE`), nunca como una letra inventada.
+- **Marcas atómicas:** en el cuadro de edición cada uno se ve como `⟦U+F0B7⟧` en otro color (`EditorConMarcas`). El cursor no entra, una selección la toma entera y se borra entera o no se borra. Al aplicar se conserva el código original en la fuente original, sin pedir glifo nuevo y sin bloquear «Aplicar». Si el párrafo se reacomoda o el texto se mueve, se reescribe con ese mismo código.
+- **Todo el documento** (`core/sin_glifo.py`, Editar → Sin glifo): cuántas veces aparece cada uno, su contexto típico y Conservar (por defecto) / espacio / tabulación / viñeta real / Quitar, con vista previa. Cambia solo cada carácter, sin mover nada, y si cambia otra cosa no deja aplicar. Lo que está dentro de un Form XObject se informa como omitido.
 
 ## Sustitución global de fuentes (modo "armónico")
 
@@ -133,29 +175,25 @@ Para PDFs con fuente privada: opción **"Reemplazar fuente en todo el documento"
 - **Comparar versiones**: dos PDFs lado a lado; diferencias de texto (palabras agregadas en verde y quitadas en rojo) y diferencias visuales por píxeles. Exportar un informe de diferencias en PDF.
 - **Firma digital con certificado** (`pyHanko`): firmar con un archivo .pfx/.p12, firma visible opcional con imagen, y validar firmas existentes.
 - **Procesamiento por lotes**: elegir una carpeta y aplicar OCR, compresión, marca de agua, numeración o conversión a todos los archivos, con barra de progreso y log.
+- **Fotos y escaneados**: importar fotos como PDF escaneado (detecta el papel) y convertir un escaneado a Word o PDF editable, con títulos, listas, tablas, encabezado y pie, y revisión de palabras dudosas.
 - **Herramientas de lectura**: búsqueda, resaltado, notas y zoom.
 
-## Fases (completar y probar cada una antes de seguir)
+## Versiones y publicación
 
-1. **Base**: estructura, .venv, detector de dependencias, visor (zoom, miniaturas, búsqueda), abrir/guardar copia, deshacer/rehacer, verificación de fidelidad.
-2. **Firmas en imagen** + quitar fondo + biblioteca.
-3. **Edición y movimiento de texto** + análisis de fuentes + comandos de instalación de fuentes.
-4. **Sustitución global de fuentes** (modo armónico).
-5. **OCR** (idéntico + reconstruido experimental).
-6. **Páginas, compresión, marca de agua y numeración.**
-7. **Redacción real y formularios.**
-8. **Comparar versiones.**
-9. **Firma digital con certificado.**
-10. **Procesamiento por lotes.**
-11. **Empaquetado** con PyInstaller (.exe) + README de instalación.
+- Versión en `pyproject.toml` y `pdf_studio/__init__.py` (van siempre iguales). `CHANGELOG.md` en español con lo agregado en cada una.
+- Para publicar: subir la versión, actualizar el changelog, commit + push y crear el tag `vX.Y.Z`. El workflow `.github/workflows/release.yml` corre las pruebas, arma el `.exe` (con `--autoprueba`) y publica el release con el ZIP y `SHA256SUMS.txt`. Verificar que quede publicado con los dos archivos.
+- El instalador reemplaza la versión anterior y conserva lo que hay en `%APPDATA%\PDFStudio`.
+- Firma con SignPath Foundation: preparada y desactivada hasta que aprueben el proyecto (ver `CODE_SIGNING.md`).
 
 ## Pruebas
 
-Armar en `tests/pdfs_prueba/` un set variado: un PDF exportado desde Word, uno escaneado, uno con fuentes recortadas, uno con formulario, uno con tablas y uno con imágenes de fondo. Cada fase debe tener tests automáticos (pytest), y en cada fase el principio 3 (fidelidad visual) se valida automáticamente.
+`tests/pdfs_prueba/` tiene un set variado sin datos reales: escaneado, fuentes recortadas, formulario, tablas, imágenes de fondo, y en `fuentes/` casos difíciles sintéticos (Type1, Type3, sin cmap, lista numerada de Word con un símbolo sin glifo). Todo cambio lleva tests automáticos (pytest) y el principio 3 (fidelidad visual) se valida automáticamente.
+
+`tests/robustez_pdfs_reales.py` corre todas las operaciones sobre copias de los PDFs de `C:\Proyectos\pdfs-reales`. Esos PDFs nunca van al repo, y sus informes solo muestran el nombre del archivo, la prueba y el tipo de error, sin contenido.
 
 ## Forma de trabajar
 
-- Avanzar fase por fase. Al terminar cada fase, resumir qué se hizo y cómo probarlo, y esperar la confirmación del usuario.
+- Al terminar un cambio, resumir qué se hizo y cómo probarlo, y esperar la confirmación del usuario.
 - Antes de instalar algo, mostrar el comando y explicar para qué sirve.
 - Si una función no puede garantizar la fidelidad en un caso concreto, avisarle al usuario en la interfaz en vez de guardar un resultado defectuoso.
 
@@ -169,7 +207,7 @@ Reglas para todas las fases (implementadas en `ui/tema.py`, `ui/iconos.py`, `ui/
 - **Íconos en todas las acciones**, del set Lucide (SVG en `pdf_studio/recursos/iconos`, licencia ISC), coloreados según el tema. Si una acción nueva necesita un ícono que no está, bajarlo del mismo set (tag fijo) y agregarlo al proyecto. Nunca mezclar otros sets.
 - **Tooltips con nombre + atajo de teclado** (y la descripción si ayuda). Deshacer/Rehacer muestran en el tooltip qué acción deshacen.
 - **Organización por pestañas** (Ver, Editar, Firmar, Páginas, Herramientas) con íconos y texto debajo; acceso rápido fijo a Abrir, Guardar, Más opciones, Deshacer y Rehacer. Cada acción nueva va a la pestaña que corresponda, nunca en una fila larga de texto.
-- **Barra lateral** con selector de íconos (Páginas, Fuentes, Faltantes) y **barra de estado discreta** (texto chico y suave; los faltantes como indicador clickeable).
+- **Barra lateral** con selector de íconos (Páginas, Fuentes, Faltantes, Formulario) y **barra de estado discreta** (texto chico y suave; los faltantes como indicador clickeable).
 - **Paleta de comandos (Ctrl+K):** toda acción nueva se crea con `_accion(...)` para que aparezca ahí, con su grupo.
 - **Accesibilidad:** todo usable con teclado (Tab, Alt+1…5 para pestañas, F6 entre regiones, atajos), foco siempre visible, nombres accesibles en botones con solo ícono, y tamaño de interfaz escalable (Ctrl+Alt+= / - / 0) que afecta texto e íconos.
 - **Botón principal** de cada diálogo con `setProperty("primario", True)`; lo destructivo o irreversible nunca es el botón por defecto.

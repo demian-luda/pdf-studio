@@ -37,8 +37,6 @@ def _recursos(tmp: Path) -> str:
     assert (DIR_RECURSOS / "logo.ico").is_file(), "falta el logo"
     assert any(DIR_FUENTES_INCLUIDAS.glob("*.ttf")), "faltan las fuentes incluidas"
     assert not iconos.crear_icono("file-key").isNull(), "faltan los íconos"
-    from fontTools.varLib import instancer       # se importa recién al usar una fuente variable
-    assert instancer.instantiateVariableFont, "falta el instanciador de fuentes variables"
     return "ok"
 
 
@@ -64,6 +62,46 @@ def _tarea(tmp: Path) -> str:
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     salida = json.loads((tmp / "resultado.json").read_text(encoding="utf-8"))
     assert salida.get("ok"), salida.get("error", "sin resultado")
+    return "ok"
+
+
+def _fuente_variable(tmp: Path) -> str:
+    """Genera una instancia de una fuente variable mínima: el instanciador se importa tarde."""
+    import io
+
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.ttLib import TTFont
+    from fontTools.ttLib.tables.TupleVariation import TupleVariation
+
+    from pdf_studio.core.fuentes import instanciar_variable
+
+    pluma = TTGlyphPen(None)
+    pluma.moveTo((0, 0))
+    pluma.lineTo((100, 0))
+    pluma.lineTo((100, 700))
+    pluma.lineTo((0, 700))
+    pluma.closePath()
+    glifo = pluma.glyph()
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "A"])
+    fb.setupCharacterMap({ord("A"): "A"})
+    fb.setupGlyf({".notdef": TTGlyphPen(None).glyph(), "A": glifo})
+    fb.setupHorizontalMetrics({".notdef": (500, 0), "A": (500, 0)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Prueba", "styleName": "Light"})
+    fb.setupOS2()
+    fb.setupPost()
+    fb.setupFvar([("wght", 300, 300, 700, "Peso")], [])
+    # Cuatro puntos del contorno y los cuatro "fantasma" de las métricas
+    deltas = [(100, 0), (100, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
+    fb.setupGvar({"A": [TupleVariation({"wght": (0, 1, 1)}, deltas)]})
+    buf = io.BytesIO()
+    fb.save(buf)
+    estatica = TTFont(io.BytesIO(instanciar_variable(buf.getvalue(), (("wght", 700.0),), "Prueba-Bold")))
+    assert "fvar" not in estatica and "gvar" not in estatica, "la instancia sigue siendo variable"
+    assert estatica["OS/2"].usWeightClass == 700, "la instancia no tiene el peso pedido"
+    assert estatica["name"].getDebugName(6) == "Prueba-Bold", "la instancia no tiene su nombre"
     return "ok"
 
 
@@ -134,6 +172,7 @@ def _ocr_real(tmp: Path) -> str:
 
 
 PRUEBAS = {"recursos": _recursos, "guardar con fidelidad": _guardar, "tarea en otro proceso": _tarea,
+           "fuente variable": _fuente_variable,
            "corrector ortográfico": _ortografia, "Word (.docx)": _word, "firma digital": _firma,
            "OpenCV": _opencv, "ocrmypdf": _ocrmypdf, "OCR con Tesseract": _ocr_real}
 

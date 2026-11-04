@@ -299,9 +299,13 @@ def instanciar_variable(datos: bytes, variacion: tuple, postscript: str = "") ->
         familia, _, estilo = postscript.partition("-")
         completo = postscript.replace("-", " ")
         valores = {1: completo, 2: "Regular", 4: completo, 6: postscript, 16: familia, 17: estilo or "Regular"}
-        for registro in fuente["name"].names:
+        tabla = fuente["name"]
+        for registro in tabla.names:
             if registro.nameID in valores:
                 registro.string = valores[registro.nameID]
+        for id_nombre in (1, 2, 4, 6):         # los básicos tienen que estar, aunque el archivo no los traiga
+            if not tabla.getDebugName(id_nombre):
+                tabla.setName(valores[id_nombre], id_nombre, 3, 1, 0x409)
     salida = io.BytesIO()
     fuente.save(salida)
     return salida.getvalue()
