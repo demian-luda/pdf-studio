@@ -207,6 +207,7 @@ class PanelFaltantes(QWidget):
 
 class PanelFuentes(QWidget):
     reemplazar_fuente = Signal(str)     # nombre de la fuente del PDF (vacío = elegir en el diálogo)
+    refrescar = Signal()                # volver a buscar las fuentes instaladas
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -226,9 +227,17 @@ class PanelFuentes(QWidget):
                                          "y editable con una fuente libre equivalente.")
         self.boton_reemplazar.clicked.connect(self._pedir_reemplazo)
         self.titulo = encabezado_panel("Fuentes del documento", self)
+        self.boton_refrescar = QToolButton(self)
+        self.boton_refrescar.setToolTip("Volver a buscar las fuentes instaladas (sin reiniciar la app)")
+        self.boton_refrescar.setAccessibleName("Volver a buscar las fuentes instaladas")
+        iconos.asignar(self.boton_refrescar, "refresh-cw")
+        self.boton_refrescar.clicked.connect(self.refrescar.emit)
+        encabezado = QHBoxLayout()
+        encabezado.addWidget(self.titulo, 1)
+        encabezado.addWidget(self.boton_refrescar)
         capa = QVBoxLayout(self)
         capa.setContentsMargins(10, 10, 6, 10)
-        capa.addWidget(self.titulo)
+        capa.addLayout(encabezado)
         capa.addWidget(self.tabla, 1)
         capa.addWidget(self.boton_reemplazar)
 
@@ -273,7 +282,9 @@ class PanelFuentes(QWidget):
             for col, valor in enumerate((f.nombre, embebido, en_windows)):
                 item = QTableWidgetItem(valor)
                 item.setToolTip(f"{f.nombre_pdf}\n{f.embebido.texto}\nTipo: {f.tipo}\nPáginas: {paginas}"
-                                + (f"\nArchivo: {f.instalada.archivo}" if f.instalada else ""))
+                                + (f"\nArchivo: {f.instalada.archivo}" if f.instalada else "")
+                                + (f" (variable: {f.instalada.detalle_variacion})"
+                                   if f.instalada and f.instalada.es_variable else ""))
                 if col == 1 and f.embebido == Embebido.SUBCONJUNTO and not (f.instalada or f.incluida):
                     item.setForeground(QColor(p.aviso))
                 if col == 2 and en_windows == "No instalada":

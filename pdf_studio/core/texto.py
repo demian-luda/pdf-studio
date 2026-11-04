@@ -19,20 +19,23 @@ from __future__ import annotations
 import io
 import statistics
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 
 import pymupdf
 
 from pdf_studio.core.codificacion import CodificadorFuente, construir_codificador
 from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
-from pdf_studio.core.fuentes import (Embebido, IndiceFuentesSistema, clase_tipografica, clave_fuente, estilo_de,
-                                     familia_de, separar_nombre, sin_prefijo)
+from pdf_studio.core.fuentes import (Embebido, IndiceFuentesSistema, bytes_de_fuente, clase_de_fuente_pdf,
+                                     clase_tipografica, clave_fuente, es_no_dibujable, estilo_de, familia_de,
+                                     separar_nombre, sin_prefijo)
 from pdf_studio.dependencias.catalogo_fuentes import FuenteLibre
 from pdf_studio.core.pdfutil import (Ref, emparejar_objetos, independizar_recursos, parsear_objeto,
                                      serializar_objeto, trasplantar, valor_de_clave)
 
-FLAGS_EXTRACCION = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_LIGATURES
+# Sin CID_FOR_UNKNOWN_UNICODE: un código sin mapa tiene que leerse U+FFFD, igual que en la traza.
+# Si no, se mostraría (y se escribiría) un carácter inventado: el CID 201 pasaría a ser «É»
+FLAGS_EXTRACCION = (pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_LIGATURES
+                    & ~pymupdf.TEXT_CID_FOR_UNKNOWN_UNICODE)
 
 AVISO_INVISIBLE = ("Este texto es la capa de reconocimiento invisible; lo que ves es la imagen. "
                    "Editarlo no cambia el aspecto de la página.")
@@ -54,6 +57,7 @@ class Glifo:
     x: float          # origen (línea base), coordenadas sin rotar
     y: float
     bbox: tuple[float, float, float, float]
+    sin_glifo: bool = False      # la fuente dibuja .notdef (el "cuadradito") en este lugar
 
 
 @dataclass
@@ -156,6 +160,54 @@ class BloqueTexto:
         tramos = [t for ln in self.lineas for t in ln.tramos]
         return any(not tramos[0].mismo_estilo(t) for t in tramos[1:])
 
+    @property
+    def caracteres_sin_glifo(self) -> set[str]:
+        """Caracteres del bloque que el PDF no puede mostrar bien. Si el mismo carácter aparece
+        también con glifo real, no cuenta: quitarlo borraría letras que se ven bien."""
+        glifos = [g for ln in self.lineas for g in ln.glifos if not g.c.isspace()]
+        con_glifo = {g.c for g in glifos if not g.sin_glifo}
+        sin_glifo = {g.c for g in glifos if g.sin_glifo} - con_glifo
+        return sin_glifo | {g.c for g in glifos if es_no_dibujable(g.c)}
+
+
+@dataclass(frozen=True)
+class CaracterSinGlifo:
+    """Un carácter problemático dentro del texto que se está editando."""
+    caracter: str
+    posiciones: tuple[int, ...]      # desde 1, contando todos los caracteres del texto
+    motivo: str
+
+    @property
+    def codigo(self) -> str:
+        return f"U+{ord(self.caracter):04X}"
+
+
+class MotivoSinGlifo:
+    NOTDEF = "el PDF lo muestra como un cuadradito: su fuente no tiene ese glifo"
+    ILEGIBLE = "el PDF no dice qué carácter es; si en la página se ve un símbolo, al quitarlo desaparece"
+    SIN_FUENTE = "ninguna fuente disponible lo tiene; si en la página se ve un símbolo, al quitarlo desaparece"
+
+
+def localizar_sin_glifo(texto: str, bloque: BloqueTexto, sin_fuente: set[str] | None = None) -> list[CaracterSinGlifo]:
+    """Dónde están, en el texto actual, los caracteres que el original no puede mostrar
+    (y los de `sin_fuente`, que ninguna opción de fuente puede dibujar)."""
+    conocidos = bloque.caracteres_sin_glifo
+    glifos = [g for ln in bloque.lineas for g in ln.glifos]
+    # Solo si todas sus apariciones son .notdef se puede asegurar que no se ve nada real
+    solo_notdef = {g.c for g in glifos if g.sin_glifo} - {g.c for g in glifos if not g.sin_glifo}
+    resultado = []
+    for c in dict.fromkeys(texto):
+        if not (c in conocidos or es_no_dibujable(c) or c in (sin_fuente or ())):
+            continue
+        if c in solo_notdef:
+            motivo = MotivoSinGlifo.NOTDEF
+        elif es_no_dibujable(c):
+            motivo = MotivoSinGlifo.ILEGIBLE
+        else:
+            motivo = MotivoSinGlifo.SIN_FUENTE
+        resultado.append(CaracterSinGlifo(c, tuple(i + 1 for i, x in enumerate(texto) if x == c), motivo))
+    return resultado
+
 
 # ---------------------------------------------------------------------- extracción
 def _rgb(entero: int) -> tuple[float, float, float]:
@@ -165,10 +217,13 @@ def _rgb(entero: int) -> tuple[float, float, float]:
 def lineas_de_pagina(pag: pymupdf.Page) -> list[list[Linea]]:
     """Bloques de líneas (solo texto horizontal), con modo de render y opacidad."""
     trazas = {}
+    notdef = set()
     for span in pag.get_texttrace():
         if span["chars"]:
             x, y = span["chars"][0][2]
             trazas[(round(x, 1), round(y, 1))] = span
+            if span["type"] != 3:      # en Type 3, el "glifo" es el código: el 0 no significa nada
+                notdef.update((round(c[2][0], 1), round(c[2][1], 1)) for c in span["chars"] if c[1] == 0)
     bloques = []
     for b in pag.get_text("rawdict", flags=FLAGS_EXTRACCION)["blocks"]:
         if b["type"] != 0:
@@ -181,7 +236,8 @@ def lineas_de_pagina(pag: pymupdf.Page) -> list[list[Linea]]:
             for s in ln["spans"]:
                 if not s["chars"]:
                     continue
-                gl = [Glifo(c["c"], c["origin"][0], c["origin"][1], tuple(c["bbox"])) for c in s["chars"]]
+                gl = [Glifo(c["c"], c["origin"][0], c["origin"][1], tuple(c["bbox"]),
+                            (round(c["origin"][0], 1), round(c["origin"][1], 1)) in notdef) for c in s["chars"]]
                 traza = trazas.get((round(gl[0].x, 1), round(gl[0].y, 1)), {})
                 t = Tramo(s["font"], s["size"], _rgb(s["color"]), s["flags"], traza.get("type", 0),
                           traza.get("opacity", 1.0), s.get("ascender", 0.9), s.get("descender", -0.2), gl)
@@ -221,7 +277,8 @@ def codificador_de_tramo(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo,
     cache = cache if cache is not None else {}
     clave = clave_fuente(tramo.fuente)
     candidatos = [f[0] for f in pag.get_fonts(full=True) if clave_fuente(f[3]) == clave]
-    mejor, error_mejor = None, None
+    letras = set(tramo.texto) - {" "}
+    mejor, error_mejor, faltan_mejor = None, None, 0
     for xref in dict.fromkeys(candidatos):
         if xref not in cache:
             try:
@@ -229,7 +286,12 @@ def codificador_de_tramo(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo,
             except Exception:
                 cache[xref] = None
         cod = cache[xref]
-        if cod is None or not cod.puede(tramo.texto.replace(" ", "")):
+        if cod is None:
+            continue
+        # Un carácter suelto sin código (U+FFFD, por ejemplo) no descalifica a la fuente: sin
+        # ella se perderían su programa y su clase. Sí la descarta si no conoce casi nada del tramo
+        faltan = len(cod.faltantes("".join(letras)))
+        if faltan and faltan * 2 >= len(letras):
             continue
         # Desempata por los anchos: el avance medido tiene que coincidir con la fuente
         error = 0.0
@@ -237,22 +299,9 @@ def codificador_de_tramo(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo,
         for a, b in zip(g, g[1:]):
             if a.c != " ":
                 error += abs((b.x - a.x) - cod.avance(a.c) / 1000 * tramo.tamano)
-        if mejor is None or error < error_mejor:
-            mejor, error_mejor = cod, error
+        if mejor is None or (faltan, error) < (faltan_mejor, error_mejor):
+            mejor, error_mejor, faltan_mejor = cod, error, faltan
     return mejor
-
-
-@lru_cache(maxsize=32)
-def bytes_de_fuente(archivo: str, indice: int = 0) -> bytes:
-    """Bytes de una fuente; para colecciones .ttc se extrae la cara pedida."""
-    ruta = Path(archivo)
-    if ruta.suffix.lower() != ".ttc":
-        return ruta.read_bytes()
-    from fontTools.ttLib import TTCollection
-    col = TTCollection(str(ruta))
-    buf = io.BytesIO()
-    col.fonts[indice].save(buf)
-    return buf.getvalue()
 
 
 def subconjunto(datos: bytes, texto: str) -> bytes:
@@ -286,13 +335,18 @@ class OpcionFuente:
     archivo: str | None = None                        # para las demás
     indice: int = 0
     metrica_compatible: bool = False
+    variacion: tuple = ()                             # instancia, si la fuente es variable
+    postscript: str = ""
 
     @property
     def disponible(self) -> bool:
         return not self.faltantes
 
+    def datos_fuente(self) -> bytes:
+        return bytes_de_fuente(self.archivo, self.indice, self.variacion, self.postscript)
+
     def fuente_pymupdf(self) -> pymupdf.Font:
-        return pymupdf.Font(fontbuffer=bytes_de_fuente(self.archivo, self.indice))
+        return pymupdf.Font(fontbuffer=self.datos_fuente())
 
 
 @dataclass
@@ -348,28 +402,32 @@ def analizar_fuente(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo, text
     if cod is not None:
         opciones.append(OpcionFuente("original", nombre, "Fuente original del PDF", cod.faltantes(texto),
                                      codificador=cod))
-    datos_programa = None
     if cod is not None and cod.embebido not in (Embebido.NO_EMBEBIDA, Embebido.TYPE3):
-        try:
-            datos_programa = doc.extract_font(cod.xref)[3] or None
-        except Exception:
-            datos_programa = None
-    clase = clase_tipografica(nombre, tramo.flags, datos_programa)
+        clase = clase_de_fuente_pdf(doc, cod.xref, nombre, tramo.flags)
+    else:
+        clase = clase_tipografica(nombre, tramo.flags)
     estilo = estilo_de(tramo.fuente, tramo.flags)
 
     def opcion(tipo: str, cara, descripcion: str, compatible: bool = False) -> OpcionFuente | None:
         try:
+            # Las letras son las mismas en todas las instancias: no hace falta generar la variable
             fuente = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
         except Exception:
-            return None
-        faltan = [c for c in dict.fromkeys(texto) if c not in "\n\r " and not fuente.has_glyph(ord(c))]
+            return None       # archivo borrado o dañado
+        # U+FFFD no cuenta aunque la fuente lo tenga: se dibujaría el rombo con el signo de pregunta
+        faltan = [c for c in dict.fromkeys(texto) if c not in "\n\r "
+                  and (es_no_dibujable(c) or not fuente.has_glyph(ord(c)))]
         return OpcionFuente(tipo, cara.nombre_visible, descripcion, faltan, archivo=cara.archivo,
-                            indice=cara.indice, metrica_compatible=compatible)
+                            indice=cara.indice, metrica_compatible=compatible, variacion=cara.variacion,
+                            postscript=cara.postscript if cara.variacion else "")
 
     if indice is not None:
         cara = indice.buscar(nombre)
         if cara is not None:
-            o = opcion("sistema", cara, f"Fuente completa instalada en Windows ({Path(cara.archivo).name})", True)
+            archivo = Path(cara.archivo).name
+            if cara.es_variable:
+                archivo += f", variable: {cara.detalle_variacion}"
+            o = opcion("sistema", cara, f"Fuente completa instalada en Windows ({archivo})", True)
             if o is not None:
                 opciones.append(o)
     if incluidas is not None:
@@ -407,7 +465,7 @@ def analizar_fuente(doc: pymupdf.Document, pag: pymupdf.Page, tramo: Tramo, text
             continue
         diferencia = 0.0
         if cod is not None and muestra and not compatible:
-            fuente = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
+            fuente = pymupdf.Font(fontbuffer=cara.datos())
             orig = sum(cod.avance(c) for c in muestra)
             nuevo = sum(fuente.glyph_advance(ord(c)) * 1000 for c in muestra)
             diferencia = abs(nuevo / orig - 1) if orig else 0.0
@@ -887,6 +945,14 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
     """Arma la operación que edita (y/o mueve) el bloque. No modifica el documento."""
     if not bloque.es_horizontal:
         raise Limitacion("Por ahora solo se puede editar texto horizontal.")
+
+    def explicar_sin_glifo() -> str:
+        raros = localizar_sin_glifo(bloque.texto, bloque)
+        if not raros:
+            return ""
+        return (f" El texto tiene un carácter sin glifo ({raros[0].codigo}, posición {raros[0].posiciones[0]}): "
+                "editalo (F2) para reemplazarlo o quitarlo.")
+
     pag = doc[bloque.pagina]
     dx, dy = desplazamiento
     avisos: list[str] = []
@@ -923,20 +989,26 @@ def planificar(doc: pymupdf.Document, bloque: BloqueTexto, texto_nuevo: str, opc
             return PlanEdicion(op, avisos)
         lineas_dibujo = []
         if opcion is None:
-            raise Limitacion("La fuente original no se puede reutilizar: elegí otra fuente.")
+            raise Limitacion("La fuente original no se puede reutilizar: elegí otra fuente." + explicar_sin_glifo())
         avisos.append("La fuente original no se pudo reutilizar; se usa " + opcion.nombre + ".")
 
     if opcion is None or not opcion.disponible:
-        raise Limitacion("La fuente elegida no tiene todos los caracteres del texto nuevo.")
+        raise Limitacion("La fuente elegida no tiene todos los caracteres del texto nuevo." + explicar_sin_glifo())
     estilo = bloque.estilo
     if bloque.varios_estilos:
         avisos.append("El texto tenía varios estilos; el texto nuevo usa el estilo del comienzo.")
+    if opcion.tipo != "original":
+        try:
+            opcion.datos_fuente()      # una instancia variable se genera recién acá (queda en caché)
+        except Exception as e:
+            raise Limitacion(f"No se pudo preparar la fuente «{opcion.nombre}» ({type(e).__name__}). "
+                             "Elegí otra opción.")
     metrica = _Metrica(opcion)
     cod_original = codificador_de_tramo(doc, pag, estilo, cache)
     escala, letras, palabras = _espaciado(estilo, cod_original)
     datos_fuente = None
     if opcion.tipo != "original":
-        datos_fuente = subconjunto(bytes_de_fuente(opcion.archivo, opcion.indice), texto_nuevo)
+        datos_fuente = subconjunto(opcion.datos_fuente(), texto_nuevo)
         if opcion.tipo == "sustituta":
             avisos.append(f"Se usó la fuente sustituta «{opcion.nombre}» en lugar de «{sin_prefijo(estilo.fuente)}».")
 

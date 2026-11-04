@@ -22,11 +22,12 @@ from dataclasses import dataclass, field
 import pymupdf
 
 from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
-from pdf_studio.core.fuentes import (Embebido, FuenteSistema, IndiceFuentesSistema, clase_tipografica,
-                                     clasificar_fuente, estilo_de, familia_de, separar_nombre, sin_prefijo)
+from pdf_studio.core.fuentes import (Embebido, FuenteSistema, IndiceFuentesSistema, clase_de_fuente_pdf,
+                                     clase_tipografica, clasificar_fuente, es_no_dibujable, estilo_de, familia_de,
+                                     separar_nombre, sin_prefijo)
 from pdf_studio.core.pdfutil import independizar_recursos
 from pdf_studio.core.texto import (F_ITALICA, F_MONO, F_NEGRITA, F_SERIF, Linea, LineaADibujar, Tramo,
-                                   _clave_glifo, _espaciado, _franja_borrado, borrar_texto, bytes_de_fuente,
+                                   _clave_glifo, _espaciado, _franja_borrado, borrar_texto,
                                    codificador_de_tramo, dibujar_con_fuente_original, glifos_de_pagina,
                                    lineas_de_pagina, subconjunto)
 
@@ -49,9 +50,12 @@ class FamiliaEnUso:
     paginas: set[int] = field(default_factory=set)
     fragmentos: int = 0
     flags: int = 0
+    clase_medida: str | None = None    # según el programa de fuente embebido, si lo tiene
 
     @property
     def clase(self) -> str:
+        if self.clase_medida is not None:
+            return self.clase_medida
         return clase_tipografica(min(self.nombres_pdf, key=len) if self.nombres_pdf else self.nombre, self.flags)
 
     @property
@@ -62,10 +66,12 @@ class FamiliaEnUso:
 def familias_del_documento(doc: pymupdf.Document) -> list[FamiliaEnUso]:
     familias: dict[str, FamiliaEnUso] = {}
     tipos = {}
+    xrefs = {}
     for pno in range(doc.page_count):
         for xref, ext, tipo, basefont, _r, _e in doc.get_page_fonts(pno):
             if sin_prefijo(basefont) not in tipos:
                 tipos[sin_prefijo(basefont)] = clasificar_fuente(doc, xref, basefont, tipo, ext)
+                xrefs[sin_prefijo(basefont)] = xref
     for pno, pag in enumerate(doc):
         for bloque in lineas_de_pagina(pag):
             for ln in bloque:
@@ -83,6 +89,8 @@ def familias_del_documento(doc: pymupdf.Document) -> list[FamiliaEnUso]:
                     emb = tipos.get(sin_prefijo(tr.fuente))
                     if emb is not None:
                         f.embebidos.add(emb)
+                    if f.clase_medida is None and emb not in (None, Embebido.NO_EMBEBIDA, Embebido.TYPE3):
+                        f.clase_medida = clase_de_fuente_pdf(doc, xrefs[sin_prefijo(tr.fuente)], tr.fuente, tr.flags)
     return sorted(familias.values(), key=lambda f: -f.fragmentos)
 
 
@@ -188,7 +196,7 @@ def candidatas(doc: pymupdf.Document, familia: FamiliaEnUso, incluidas: IndiceFu
         for c in resultado:
             try:
                 cara = c.cara(estilo)
-                fuente = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
+                fuente = pymupdf.Font(fontbuffer=cara.datos())
             except Exception:
                 continue
             c.parecido = _ancho_medio(fuente) / original
@@ -393,7 +401,7 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
                         continue
                     estilo = _estilo_tramo(tr)
                     cara = cand.cara(estilo)
-                    clave = f"{cara.archivo}#{cara.indice}"
+                    clave = f"{cara.archivo}#{cara.indice}#{cara.detalle_variacion}"
                     caras[clave] = cara
                     caracteres.setdefault(clave, set()).update(tr.texto)
                     tramos_por_pagina.setdefault(pno, []).append((tr, clave, ln.texto))
@@ -403,10 +411,10 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
     metricas: dict[str, pymupdf.Font] = {}
     nombres: dict[str, str] = {}
     for clave, cara in caras.items():
-        completa = pymupdf.Font(fontbuffer=bytes_de_fuente(cara.archivo, cara.indice))
-        faltan = {c for c in caracteres[clave] if c.strip() and not completa.has_glyph(ord(c))}
+        completa = pymupdf.Font(fontbuffer=cara.datos())
+        faltan = {c for c in caracteres[clave] if c.strip() and (es_no_dibujable(c) or not completa.has_glyph(ord(c)))}
         texto = "".join(sorted(caracteres[clave] - faltan))
-        fuentes[clave] = subconjunto(bytes_de_fuente(cara.archivo, cara.indice), texto)
+        fuentes[clave] = subconjunto(cara.datos(), texto)
         metricas[clave] = pymupdf.Font(fontbuffer=fuentes[clave])
         nombres[clave] = cara.postscript or cara.nombre_visible.replace(" ", "")
 
@@ -420,7 +428,7 @@ def planificar_sustitucion(doc: pymupdf.Document, elecciones: dict[str, Candidat
         ajustes_pagina: list[AjusteLinea] = []
         for tr, clave, texto_linea in lista:
             fuente = metricas[clave]
-            faltan = [c for c in tr.texto if c.strip() and not fuente.has_glyph(ord(c))]
+            faltan = [c for c in tr.texto if c.strip() and (es_no_dibujable(c) or not fuente.has_glyph(ord(c)))]
             if faltan:
                 omitidos.append(f"Página {pno + 1}: «{tr.texto[:30]}» (la sustituta no tiene «{faltan[0]}»)")
                 continue

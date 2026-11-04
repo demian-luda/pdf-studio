@@ -109,7 +109,7 @@ def _comando_desde_lista(titulo: str, obtener_archivos: str, copiar_local: bool 
         f"  New-ItemProperty -Path '{_REGISTRO}' -Name \"$([IO.Path]::GetFileNameWithoutExtension($nombre)) (TrueType)\" "
         "-Value $ruta -PropertyType String -Force | Out-Null",
         "}",
-        f"Write-Host 'Listo: {titulo} quedó instalada. Reiniciá PDF Studio para usarla.'",
+        f"Write-Host 'Listo: {titulo} quedó instalada. En PDF Studio tocá Ya la instalé o Volver a chequear: no hace falta reiniciar.'",
     ])
 
 

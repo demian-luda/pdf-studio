@@ -7,8 +7,10 @@ Cada PDF tiene una línea con la fuente especial y otra en Helvetica:
 - truetype_sin_cmap.pdf TrueType CID (Identity-H) cuyo programa no tiene tabla cmap
 - truetype_simbolica.pdf TrueType simple simbólica: solo cmap (3,0) en U+F0xx, sin /Encoding
 - cid_cidtogid.pdf      CIDFontType2 con /CIDToGIDMap en stream y sin /ToUnicode
+- quicksand_sin_glifo.pdf  Subconjunto de Quicksand-Bold con dos códigos que dibujan .notdef:
+                        uno mapeado a U+E123 y otro sin /ToUnicode (se extrae como U+FFFD)
 
-Las fuentes salen de Liberation Sans (OFL) o se construyen acá; los textos son ficticios.
+Las fuentes salen de Liberation Sans o Quicksand (OFL) o se construyen acá; los textos son ficticios.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 RAIZ = Path(__file__).resolve().parent
 FUENTE_BASE = RAIZ.parent / "pdf_studio" / "recursos" / "fuentes" / "LiberationSans-Regular.ttf"
 DESTINO = RAIZ / "pdfs_prueba" / "fuentes"
+QUICKSAND_VARIABLE = RAIZ / "fuentes_prueba" / "Quicksand.ttf"     # variable, eje wght de 300 a 700
 
 
 # ---------------------------------------------------------------------- utilidades PDF
@@ -282,10 +285,62 @@ def cid_cidtogid(salida: Path) -> None:
     _guardar(doc, pag, fuente, b"BT /FX 18 Tf 40 80 Td <" + codigos.hex().encode() + b"> Tj ET", salida)
 
 
+# ---------------------------------------------------------------------- Quicksand con códigos sin glifo
+TEXTOS_QUICKSAND = ("Hola \ue123 mundo", "Linea \ufffd final")       # Los raros van en códigos propios
+
+
+def quicksand_sin_glifo(salida: Path) -> None:
+    from pdf_studio.core.fuentes import instanciar_variable
+    from pdf_studio.core.texto import subconjunto
+    letras = sorted({c for t in TEXTOS_QUICKSAND for c in t} - {"\ue123", "\ufffd"})
+    completa = instanciar_variable(QUICKSAND_VARIABLE.read_bytes(), (("wght", 700.0),), "Quicksand-Bold")
+    f = TTFont(io.BytesIO(subconjunto(completa, "".join(letras))))
+    cmap = f.getBestCmap()
+    orden = f.getGlyphOrder()
+    upem = f["head"].unitsPerEm
+    nombre = "QKSAND+Quicksand-Bold"
+    cid_de = {c: 100 + i for i, c in enumerate(letras)}
+    cid_de["\ue123"], cid_de["\ufffd"] = 200, 201       # los dos van al glifo 0 (.notdef)
+    tabla = bytearray(2 * 202)
+    anchos = {}
+    for c, cid in cid_de.items():
+        glifo = cmap[ord(c)] if ord(c) in cmap else ".notdef"
+        gid = orden.index(glifo)
+        tabla[2 * cid], tabla[2 * cid + 1] = gid >> 8, gid & 0xFF
+        anchos[cid] = round(f["hmtx"][glifo][0] * 1000 / upem)
+    tounicode = ["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap",
+                 "1 begincodespacerange", "<0000> <FFFF>", "endcodespacerange",
+                 f"{len(cid_de) - 1} beginbfchar"]
+    # El U+FFFD no se declara: así queda un código que el PDF no dice qué carácter es
+    tounicode += [f"<{cid:04X}> <{ord(c):04X}>" for c, cid in cid_de.items() if c != "\ufffd"]
+    tounicode += ["endbfchar", "endcmap", "end", "end"]
+    buf = io.BytesIO()
+    f.save(buf)
+    doc, pag = _documento()
+    archivo = _stream(doc, buf.getvalue(), f"<</Length1 {len(buf.getvalue())}>>")
+    mapa = _stream(doc, bytes(tabla))
+    unicode_ = _stream(doc, "\n".join(tounicode).encode("ascii"))
+    desc = _objeto(doc, f"<</Type/FontDescriptor/FontName/{nombre}/Flags 4/FontBBox[-200 -250 1100 950]"
+                        f"/ItalicAngle 0/Ascent 1000/Descent -250/CapHeight 700/StemV 120/FontFile2 {archivo} 0 R>>")
+    w = " ".join(f"{cid} [{a}]" for cid, a in sorted(anchos.items()))
+    hija = _objeto(doc, f"<</Type/Font/Subtype/CIDFontType2/BaseFont/{nombre}"
+                        f"/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
+                        f"/FontDescriptor {desc} 0 R/W[{w}]/CIDToGIDMap {mapa} 0 R>>")
+    fuente = _objeto(doc, f"<</Type/Font/Subtype/Type0/BaseFont/{nombre}/Encoding/Identity-H"
+                          f"/DescendantFonts[{hija} 0 R]/ToUnicode {unicode_} 0 R>>")
+
+    def linea(texto: str, y: int) -> bytes:
+        codigos = b"".join(cid_de[c].to_bytes(2, "big") for c in texto)
+        return b"BT /FX 18 Tf 40 %d Td <" % y + codigos.hex().encode() + b"> Tj ET"
+
+    contenido = linea(TEXTOS_QUICKSAND[0], 100) + b"\n" + linea(TEXTOS_QUICKSAND[1], 60)
+    _guardar(doc, pag, fuente, contenido, salida)
+
+
 GENERADORES = {
     "cff_type1c.pdf": cff_type1c, "type1.pdf": type1, "type3.pdf": type3,
     "truetype_sin_cmap.pdf": truetype_sin_cmap, "truetype_simbolica.pdf": truetype_simbolica,
-    "cid_cidtogid.pdf": cid_cidtogid,
+    "cid_cidtogid.pdf": cid_cidtogid, "quicksand_sin_glifo.pdf": quicksand_sin_glifo,
 }
 
 

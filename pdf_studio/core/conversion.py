@@ -811,7 +811,8 @@ def fuentes_disponibles() -> list[Fuente]:
         for familia in familias:
             for origen, indice in (("sistema", indice_sistema()), ("incluida", indice_incluidas())):
                 try:
-                    caras = indice.familia(familia)
+                    # La conversión usa el archivo tal cual: una variable daría siempre su peso por defecto
+                    caras = [c for c in indice.familia(familia) if not c.es_variable]
                 except Exception:
                     caras = []
                 por_estilo = {separar_nombre(f"{c.familia},{c.estilo}")[1]: c for c in caras}

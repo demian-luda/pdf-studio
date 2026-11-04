@@ -372,7 +372,7 @@ class VentanaPrincipal(QMainWindow):
         self.acc_comparar = self._accion("Comparar versiones…", "git-compare", "Ctrl+Shift+C", self.comparar_versiones,
                                          grupo=H, tip="Dos PDFs lado a lado: texto agregado y quitado, diferencias "
                                                       "visuales e informe en PDF.", corto="Comparar")
-        self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.chequear_dependencias,
+        self.acc_chequear = self._accion("Verificar dependencias", "shield-check", None, self.refrescar_y_chequear,
                                          grupo=H)
         self.acc_paleta = self._accion("Paleta de comandos", "command", "Ctrl+K", self.abrir_paleta, grupo=H,
                                        tip="Buscá cualquier acción por su nombre.")
@@ -476,7 +476,8 @@ class VentanaPrincipal(QMainWindow):
         suprimir.setContext(Qt.ShortcutContext.WidgetShortcut)
         suprimir.activated.connect(self.eliminar_paginas)
         self.busqueda.resultados_cambiaron.connect(self.visor.mostrar_resultados)
-        self.faltantes.rechequear.connect(self.chequear_dependencias)
+        self.faltantes.rechequear.connect(self.refrescar_y_chequear)
+        self.panel_fuentes.refrescar.connect(self.refrescar_y_chequear)
         self.faltantes.instalar.connect(self.instalar_faltante)
         self.panel_fuentes.reemplazar_fuente.connect(lambda nombre: self.sustituir_fuentes(nombre or None))
         self.visor.texto_clic.connect(self._texto_clic)
@@ -565,7 +566,7 @@ class VentanaPrincipal(QMainWindow):
 
     def _dialogo_editar_texto(self, bloque: BloqueTexto) -> tuple[str, OpcionFuente] | None:
         dialogo = DialogoEditarTexto(bloque, lambda texto: self._analizar(bloque, texto),
-                                     lambda: indice_sistema().cargar(), self,
+                                     self._reescanear_fuentes, self,
                                      instalar=lambda fuente: self.instalar(instalacion_fuente(fuente)))
         if dialogo.exec() and dialogo.opcion_elegida() is not None:
             return dialogo.texto, dialogo.opcion_elegida()
@@ -2242,7 +2243,12 @@ class VentanaPrincipal(QMainWindow):
     def _aplicar_plan(self, bloque: BloqueTexto, texto: str, opcion: OpcionFuente | None,
                       desplazamiento: tuple[float, float]) -> bool:
         try:
-            plan = planificar(self.documento.doc, bloque, texto, opcion, desplazamiento, self._cache_fuentes)
+            # Puede tardar unos segundos si hay que generar la instancia de una fuente variable
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                plan = planificar(self.documento.doc, bloque, texto, opcion, desplazamiento, self._cache_fuentes)
+            finally:
+                QApplication.restoreOverrideCursor()
             if plan.avisos and not self._confirmar_avisos(plan.avisos):
                 self.visor.recargar()
                 return False
@@ -2303,6 +2309,32 @@ class VentanaPrincipal(QMainWindow):
         if self.proceso_tarea.ocupado:
             texto = (texto + " · " if texto else "") + "Procesando…"
         self.etiqueta_analisis.setText(texto)
+
+    def _reescanear_fuentes(self) -> None:
+        """Para el diálogo de edición, que espera el resultado. Si falla, el diálogo lo informa."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            indice_sistema().recargar()
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._chequear_fuentes_documento(mostrar=False)
+
+    def refrescar_y_chequear(self, *_args) -> None:
+        """Vuelve a leer las fuentes instaladas y recién después chequea, para que los paneles
+        ya vean lo que se instaló con la app abierta (desde ella o por fuera)."""
+        self.statusBar().showMessage("Buscando las fuentes instaladas…")
+
+        def listo(_resultado) -> None:
+            self.statusBar().showMessage("Fuentes actualizadas.", 4000)
+            self.chequear_dependencias()
+
+        def fallo(error) -> None:
+            registro().error("No se pudieron volver a leer las fuentes: %r", error)
+            self.statusBar().showMessage("No se pudieron volver a leer las fuentes instaladas: "
+                                         "se sigue con las que ya se conocían.", 8000)
+            self.chequear_dependencias()
+
+        self._en_hilo(indice_sistema().recargar, listo, fallo)
 
     def chequear_dependencias(self, mostrar: bool = True) -> None:
         """Chequea paquetes y programas en segundo plano (Tesseract puede tardar en responder)."""

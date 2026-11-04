@@ -23,6 +23,7 @@ ESPERADO = {
     "truetype_sin_cmap.pdf": {Embebido.SUBCONJUNTO},
     "truetype_simbolica.pdf": {Embebido.SUBCONJUNTO, Embebido.NO_ANALIZADA},
     "cid_cidtogid.pdf": {Embebido.SUBCONJUNTO, Embebido.NO_ANALIZADA},
+    "quicksand_sin_glifo.pdf": {Embebido.SUBCONJUNTO},
 }
 
 

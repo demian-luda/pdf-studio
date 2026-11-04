@@ -233,7 +233,7 @@ def instalacion_fuente(fuente) -> Instalacion:
     def accion(progreso: Progreso) -> str:
         archivos = instalar_fuente(fuente, progreso)
         from pdf_studio.core.fuentes import indice_sistema
-        indice_sistema().cargar()
+        indice_sistema().recargar()
         return f"«{fuente.nombre}» quedó instalada ({len(archivos)} archivo(s)). Ya se puede usar."
 
     return Instalacion(f"fuente:{fuente.nombre}", f"Fuente «{fuente.nombre}»", fuente.origen, fuente.licencia,

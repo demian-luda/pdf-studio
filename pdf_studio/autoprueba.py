@@ -37,6 +37,8 @@ def _recursos(tmp: Path) -> str:
     assert (DIR_RECURSOS / "logo.ico").is_file(), "falta el logo"
     assert any(DIR_FUENTES_INCLUIDAS.glob("*.ttf")), "faltan las fuentes incluidas"
     assert not iconos.crear_icono("file-key").isNull(), "faltan los íconos"
+    from fontTools.varLib import instancer       # se importa recién al usar una fuente variable
+    assert instancer.instantiateVariableFont, "falta el instanciador de fuentes variables"
     return "ok"
 
 
