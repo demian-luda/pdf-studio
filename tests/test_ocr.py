@@ -11,6 +11,9 @@ from pdf_studio.core.fidelidad import comparar_paginas
 from pdf_studio.core.rangos import describir_rango, parsear_rango
 from tests.conftest import DIR_PDFS, hash_archivo
 
+# Usa Tesseract, OpenCV, ocrmypdf o arma procesos aparte: en la PC, de a un archivo
+pytestmark = pytest.mark.pesado
+
 LETRAS = ("Acta de reunión", "presupuesto anual")
 
 

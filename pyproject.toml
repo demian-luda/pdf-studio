@@ -10,4 +10,5 @@ testpaths = ["tests"]
 qt_api = "pyside6"
 markers = [
     "red: tests que necesitan conexión a internet (se saltean con -m 'not red')",
+    "pesado: usan Tesseract, OpenCV, ocrmypdf o procesos aparte (en la PC: de a un archivo; ver CLAUDE.md)",
 ]

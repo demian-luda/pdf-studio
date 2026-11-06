@@ -11,6 +11,9 @@ from collections import Counter
 import numpy as np
 import pytest
 
+# Usa Tesseract, OpenCV, ocrmypdf o arma procesos aparte: en la PC, de a un archivo
+pytestmark = pytest.mark.pesado
+
 pytest.importorskip("cv2")
 pytest.importorskip("docx")
 

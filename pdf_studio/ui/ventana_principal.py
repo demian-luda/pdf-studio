@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import weakref
 from pathlib import Path
 
 import pymupdf
@@ -894,12 +895,21 @@ class VentanaPrincipal(QMainWindow):
         if pestana in self.pestanas:
             indice = self.pestanas.index(pestana)
             self.pestanas.pop(indice)
-            self.barra_pestanas.blockSignals(True)
-            self.barra_pestanas.removeTab(indice)
-            self.barra_pestanas.blockSignals(False)
+            barra = self.barra_pestanas
+            # removeTab oculta el botón de cerrar pero no lo destruye: se destruye acá
+            boton = barra.tabButton(indice, QTabBar.ButtonPosition.RightSide)
+            barra.blockSignals(True)
+            barra.removeTab(indice)
+            barra.blockSignals(False)
+            if boton is not None:
+                boton.deleteLater()
             if self.pestanas and not self._cerrando_todo:
                 self._mostrar(self.pestanas[min(indice, len(self.pestanas) - 1)])
         self.barra_pestanas.setVisible(bool(self.pestanas))
+        if not self.pestanas:
+            # Sin documentos abiertos, el caché global de MuPDF (imágenes y fuentes decodificadas)
+            # ya no le sirve a nadie: se devuelve esa memoria
+            pymupdf.TOOLS.store_shrink(100)
         self._actualizar_estado()
         return True
 
@@ -957,10 +967,19 @@ class VentanaPrincipal(QMainWindow):
         cerrar.setToolTip("Cerrar documento (Ctrl+W)")
         cerrar.setAccessibleName(f"Cerrar {pestana.documento.ruta_original.name}")
         iconos.asignar(cerrar, "x")
-        cerrar.clicked.connect(lambda _=False, p=pestana: self.cerrar_pestana(p))
+        # El botón no guarda la pestaña (retendría el documento): busca su índice al hacer clic
+        cerrar.clicked.connect(self._clic_cerrar_pestana)
         barra.setTabButton(indice, QTabBar.ButtonPosition.RightSide, cerrar)
         barra.blockSignals(False)
         barra.show()
+
+    def _clic_cerrar_pestana(self) -> None:
+        boton = self.sender()
+        barra = self.barra_pestanas
+        for i in range(barra.count()):
+            if barra.tabButton(i, QTabBar.ButtonPosition.RightSide) is boton and i < len(self.pestanas):
+                self.cerrar_pestana(self.pestanas[i])
+                return
 
     def _dejar_activa(self) -> None:
         """Guarda en su pestaña el estado del documento activo, antes de mostrar otro."""
@@ -2658,13 +2677,17 @@ class VentanaPrincipal(QMainWindow):
 
         self._pedido_analisis += 1
         pedido = self._pedido_analisis
+        # Referencia débil: si la pestaña se cierra antes, el pedido no retiene su documento
+        ref_pestana = weakref.ref(pestana) if pestana is not None else (lambda: None)
+        del doc
 
         def iniciar() -> None:
             # Para cuando se ve la primera página, el usuario pudo haber pasado a otra pestaña o
             # haberlo pedido de nuevo
-            if (pedido == self._pedido_analisis and self._activa is pestana and self.documento is doc
-                    and pestana.analisis == "analizando"):
-                self.analizador.iniciar(ruta, doc.contrasena)
+            p = ref_pestana()
+            if (p is not None and pedido == self._pedido_analisis and self._activa is p
+                    and self.documento is p.documento and p.analisis == "analizando"):
+                self.analizador.iniciar(ruta, p.documento.contrasena)
 
         self._cuando_se_vea(iniciar)
 

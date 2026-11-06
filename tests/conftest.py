@@ -65,6 +65,32 @@ def sin_dialogos_modales(monkeypatch):
     yield
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Después de cada test (y de todos sus fixtures) destruye las ventanas que quedaron.
+
+    pytest-qt las cierra pero no las destruye, y una VentanaPrincipal cerrada sigue viva: sus
+    acciones tienen conectadas lambdas que la referencian desde C++, un ciclo que el gc de
+    Python no ve. A lo largo de la suite se acumulaban cientos de ventanas con sus widgets,
+    cachés de páginas y documentos (varios GB)."""
+    yield
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent, QThread
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.topLevelWidgets():
+        # Destruir un hilo en marcha cierra el proceso de golpe: primero se espera que termine
+        if all(h.wait(10_000) for h in w.findChildren(QThread)):
+            w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    gc.collect()
+
+
 @pytest.fixture
 def ventana(qtbot, monkeypatch, tmp_path):
     from pdf_studio.core.imagenes import BibliotecaFirmas

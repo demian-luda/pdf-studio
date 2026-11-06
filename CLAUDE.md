@@ -210,6 +210,19 @@ Para PDFs con fuente privada: opción **"Reemplazar fuente en todo el documento"
 
 `tests/robustez_pdfs_reales.py` corre todas las operaciones sobre copias de los PDFs de `C:\Proyectos\pdfs-reales`. Esos PDFs nunca van al repo, y sus informes solo muestran el nombre del archivo, la prueba y el tipo de error, sin contenido.
 
+### Dónde y cómo correr la suite
+
+La PC del usuario tiene 15 GB y con su uso normal (navegadores, Claude, WSL) suele quedar con ~2 GB libres. La suite completa usa ~1 GB en el proceso de tests más picos de ~0,5 GB del OCR: alcanza para quedarse sin memoria. Por eso:
+
+- **Suite completa: en GitHub**, con el workflow `pruebas.yml` (`gh workflow run pruebas.yml --ref <rama>`). Deja un resumen de memoria en la corrida y el registro `memoria.tsv` como artefacto. Nunca a la vez que el armado del .exe.
+- **En la PC, por partes:**
+  - Livianos (~540 tests, todos juntos): `python -m pytest -m "not red and not pesado"`.
+  - Pesados (marcador `pesado`: Tesseract, OpenCV, ocrmypdf, autoprueba), **de a un archivo**: `python -m pytest tests\test_ocr.py` (también `test_conversion`, `test_escaneo`, `test_empaquetado`, `test_lotes`, `test_tablas_poe`). Cada uno llega a ~0,5-0,7 GB contando sus subprocesos.
+  - Un archivo nuevo que use Tesseract, OpenCV, ocrmypdf o procesos aparte lleva `pytestmark = pytest.mark.pesado`.
+- **Medir la memoria:** `PDFSTUDIO_MEMORIA=memoria.tsv python -m pytest -p tests.memoria ...` y `python herramientas/resumen_memoria.py memoria.tsv`. Muestra la memoria tras cada test, el pico de todo el árbol de procesos y lo que sigue vivo al terminar cada archivo (documentos, ventanas, widgets, hilos).
+- `conftest.py` destruye después de cada test las ventanas que quedaron: pytest-qt las cierra pero no las destruye, y una `VentanaPrincipal` cerrada sigue viva (sus acciones tienen lambdas que la referencian desde C++).
+- **Memoria de la app con pestañas:** `python herramientas/medir_memoria_pestanas.py C:\Proyectos\pdfs-reales` abre 20 PDFs, los cierra y repite 3 veces. Al cerrar todo tiene que volver a lo mismo en cada ronda, con 0 `Documento` y 0 `Pestana` vivos.
+
 ## Forma de trabajar
 
 - Al terminar un cambio, resumir qué se hizo y cómo probarlo, y esperar la confirmación del usuario.

@@ -6,6 +6,9 @@ import numpy as np
 import pymupdf
 import pytest
 
+# Usa Tesseract, OpenCV, ocrmypdf o arma procesos aparte: en la PC, de a un archivo
+pytestmark = pytest.mark.pesado
+
 pytest.importorskip("cv2")
 
 from pdf_studio.core import escaneo  # noqa: E402

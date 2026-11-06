@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+# Usa Tesseract, OpenCV, ocrmypdf o arma procesos aparte: en la PC, de a un archivo
+pytestmark = pytest.mark.pesado
+
 RAIZ = Path(__file__).resolve().parent.parent
 INSTALADOR = RAIZ / "instalador"
 sys.path.insert(0, str(RAIZ / "herramientas"))
