@@ -1,0 +1,70 @@
+# Corre la suite de pruebas en GitHub (para no cargar la PC) y registra la memoria.
+#
+# A mano desde la pestaña Actions o con:
+#   gh workflow run pruebas.yml --ref <rama> [-f marcadores="not red"]
+# El resumen de memoria queda en el resumen de la corrida y el registro completo
+# (memoria.tsv, un renglón por test) como artefacto.
+name: Pruebas
+
+on:
+  workflow_dispatch:
+    inputs:
+      marcadores:
+        description: "Expresión de marcadores para pytest -m (por ejemplo: not red, pesado, not pesado)"
+        required: false
+        default: "not red"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13.13"
+  PYTHONHASHSEED: "0"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  pruebas:
+    runs-on: windows-latest
+    steps:
+      - name: Código
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97   # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dependencias con versión fija
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade "pip==26.2.1"
+          python -m pip install -r requirements.txt
+
+      - name: Pruebas (con registro de memoria)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PDFSTUDIO_MEMORIA: memoria.tsv
+          MARCADORES: ${{ inputs.marcadores }}
+        run: |
+          $m = if ($env:MARCADORES) { $env:MARCADORES } else { "not red" }
+          python -m pytest -q -p tests.memoria -m $m
+
+      - name: Resumen de memoria
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path memoria.tsv) {
+            python herramientas/resumen_memoria.py memoria.tsv | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      - name: Subir el registro de memoria
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
+        with:
+          name: memoria
+          path: memoria.tsv
+          if-no-files-found: warn
+          retention-days: 14
