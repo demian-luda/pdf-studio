@@ -3,7 +3,7 @@ import os as _os
 import sys as _sys
 
 NOMBRE_APP = "PDF Studio"
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # pymupdf 2.0 instala como dependencias pymupdf_layout y pymupdf4llm, y al importarse carga
 # los dos (con onnxruntime y modelos de análisis de diagramación): más de un segundo de
