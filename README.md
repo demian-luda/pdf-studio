@@ -44,7 +44,7 @@ Si no querés instalarla, también funciona sin instalar: abrí `PDFStudio\PDFSt
 Si Windows muestra «Windows protegió su PC», es porque esta versión del ejecutable todavía no está firmada. Hacé clic en *Más información → Ejecutar de todas formas*. Para estar seguro de que el archivo es el original, compará su SHA-256 con el `SHA256SUMS.txt` del release:
 
 ```powershell
-Get-FileHash .\PDFStudio-0.2.0-windows.zip -Algorithm SHA256
+Get-FileHash .\PDFStudio-0.3.0-windows.zip -Algorithm SHA256
 ```
 
 **Firma de código:** pedimos la firma gratuita para proyectos de código abierto de [SignPath Foundation](https://signpath.org/). Cuando la aprueben, los releases van a decir: *Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)*. La política de firma está en [CODE_SIGNING.md](CODE_SIGNING.md).

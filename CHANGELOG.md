@@ -2,7 +2,7 @@
 
 Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](https://semver.org/lang/es/).
 
-## [Sin publicar]
+## [0.3.0] - 2026-11-06
 
 ### Agregado
 
@@ -19,6 +19,8 @@ Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](ht
   PDF con la app abierta se ve en 0,3 s. Los íconos se dibujan recién cuando hacen falta, numpy, pikepdf y
   fontTools se cargan al usarlos, y el análisis de fuentes, el chequeo de dependencias y el índice de
   fuentes del sistema empiezan después de mostrar la primera página.
+- **Notas de cada versión.** Las notas del release salen solas de la sección de esta versión en el
+  CHANGELOG, más los pasos de instalación.
 
 ### Corregido
 
@@ -80,5 +82,6 @@ en imagen y firma digital con certificado, OCR, conversión de escaneados a Word
 compresión, marca de agua, numeración, redacción real, formularios, comparar versiones y procesamiento
 por lotes.
 
+[0.3.0]: https://github.com/demian-luda/pdf-studio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/demian-luda/pdf-studio/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/demian-luda/pdf-studio/releases/tag/v0.1.0
