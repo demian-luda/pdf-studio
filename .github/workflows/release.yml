@@ -1,6 +1,9 @@
 # Arma PDF Studio para Windows desde el código del repo y publica el release.
 #
 # Se dispara al crear un tag v* (por ejemplo v0.2.0) o a mano desde la pestaña Actions.
+# A mano arma y prueba todo, pero NO publica: las notas quedan en el resumen de la corrida.
+# Las notas del release salen de la sección de CHANGELOG.md de la versión del tag, más los
+# pasos de instalación (herramientas/notas_release.py). Si esa sección falta, falla enseguida.
 # Reproducible: Python, paquetes (requirements-empaquetado.txt) y acciones con versión fija
 # (las acciones por SHA de commit); PYTHONHASHSEED=0 y SOURCE_DATE_EPOCH = fecha del commit.
 #
@@ -16,6 +19,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión para armar las notas (por ejemplo v0.2.0). Vacío: la de pyproject.toml."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -41,6 +49,24 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97   # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Notas del release (sección del CHANGELOG.md + instalación)
+        shell: pwsh
+        env:
+          VERSION_MANUAL: ${{ inputs.version }}
+          ES_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          REF_NAME: ${{ github.ref_name }}
+          FIRMADO: ${{ vars.SIGNPATH_HABILITADO }}
+        run: |
+          $tag = if ($env:ES_TAG -eq "true") { $env:REF_NAME }
+                 elseif ($env:VERSION_MANUAL) { $env:VERSION_MANUAL }
+                 else { "v" + (python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])") }
+          $opciones = @("--salida", "notas-release.md")
+          if ($env:FIRMADO -eq "true") { $opciones += "--firmado" }
+          python herramientas/notas_release.py $tag @opciones
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "## Notas del release $tag`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Get-Content notas-release.md -Raw -Encoding utf8 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Fecha fija para los archivos (la del commit)
         shell: pwsh
@@ -109,16 +135,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $firmado = "${{ vars.SIGNPATH_HABILITADO }}" -eq "true"
-          $nota = if ($firmado) {
-            "El .exe está firmado por SignPath Foundation (ver CODE_SIGNING.md)."
-          } else {
-            "El .exe todavía no está firmado: Windows puede mostrar «Windows protegió su PC» (Más información → Ejecutar de todas formas)."
-          }
-          $cuerpo = "Armado por GitHub Actions desde el código del tag $tag.`n`n$nota`n`nComprobá la descarga con SHA256SUMS.txt."
           $zip = Get-ChildItem dist/PDFStudio-*-windows.zip | Select-Object -First 1
           if (gh release view $tag 2>$null) {
             gh release upload $tag $zip.FullName dist/SHA256SUMS.txt --clobber
+            gh release edit $tag --notes-file notas-release.md
           } else {
-            gh release create $tag $zip.FullName dist/SHA256SUMS.txt --verify-tag --title "PDF Studio $($tag.TrimStart('v'))" --notes $cuerpo
+            gh release create $tag $zip.FullName dist/SHA256SUMS.txt --verify-tag --title "PDF Studio $($tag.TrimStart('v'))" --notes-file notas-release.md
           }
