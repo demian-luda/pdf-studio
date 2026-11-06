@@ -14,10 +14,10 @@ from PIL import Image
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QInputDialog, QLabel,
-                               QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressDialog, QToolButton,
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressDialog, QTabBar, QToolButton,
                                QVBoxLayout, QWidget)
 
-from pdf_studio import NOMBRE_APP
+from pdf_studio import NOMBRE_APP, posiciones
 from pdf_studio.config import DIR_RECURSOS
 from pdf_studio.core.anotaciones import AgregarNota, AgregarResaltado, quads_de_palabras
 from pdf_studio.core.documento import Documento, ErrorContrasena, ErrorDocumento, Guardado, Limitacion
@@ -65,6 +65,7 @@ from pdf_studio.ui.ocr import DialogoOCR
 from pdf_studio.ui.paginas import (DialogoComprimir, DialogoExtraer, DialogoInsertarPDF, DialogoMarcaAgua,
                                    DialogoNumeracion, DialogoResultadoCompresion, DialogoSeparar)
 from pdf_studio.ui.paleta_comandos import PaletaComandos
+from pdf_studio.ui.pestanas import BarraPestanas, Pestana
 from pdf_studio.ui.segundo_plano import AnalizadorFuentes, EnHilo, ProcesoExterno
 from pdf_studio.ui.panel_faltantes import PanelFaltantes, PanelFuentes
 from pdf_studio.ui.redaccion import DialogoAplicarRedaccion, DialogoBuscarRedactar
@@ -73,12 +74,20 @@ from pdf_studio.ui.tema import gestor
 from pdf_studio.ui.visor import Modo, Visor
 
 PESTANAS = ("Ver", "Editar", "Firmar", "Páginas", "Herramientas")
+ESPERA_MAX_MS = 1000      # tope para lo que espera a la primera página (si nunca se dibuja)
 
 
 class VentanaPrincipal(QMainWindow):
     def __init__(self, chequear_al_iniciar: bool = True, biblioteca: BibliotecaFirmas | None = None):
         super().__init__()
-        self.documento: Documento | None = None
+        self.documento: Documento | None = None       # el de la pestaña activa
+        self.pestanas: list[Pestana] = []
+        self._activa: Pestana | None = None
+        self._por_abrir: list[str] = []                # llegaron con un diálogo o una tarea en curso
+        self._aviso_actual: tuple | None = None        # (texto, botón, acción, ícono) del aviso visible
+        self._cerrando_todo = False
+        self._cerrada = False                          # closeEvent aceptado
+        self._pedido_analisis = 0                      # para descartar pedidos de análisis viejos
         self.biblioteca = biblioteca if biblioteca is not None else BibliotecaFirmas()
         self.bloque: BloqueTexto | None = None        # texto seleccionado en modo Editar texto
         self._cache_fuentes: dict = {}
@@ -110,7 +119,20 @@ class VentanaPrincipal(QMainWindow):
         self.resize(1280, 860)
         self.setAcceptDrops(True)
 
-        # Centro: aviso + barra de búsqueda + visor
+        # Lo que puede esperar (índice de fuentes, chequeos, análisis) arranca recién cuando ya
+        # se ve la primera página, para no competir con abrir el documento
+        self._arrancando = True
+        self._tras_pintura: list = []
+        self._reloj_pintura = QTimer(self)
+        self._reloj_pintura.setSingleShot(True)
+        self._reloj_pintura.timeout.connect(self._correr_tras_pintura)
+        self._reloj_por_abrir = QTimer(self)
+        self._reloj_por_abrir.setInterval(400)
+        self._reloj_por_abrir.timeout.connect(self._abrir_pendientes)
+
+        # Centro: pestañas + aviso + barra de búsqueda + visor
+        self.barra_pestanas = BarraPestanas(self)
+        self.barra_pestanas.hide()
         self.visor = Visor(self)
         self.busqueda = BarraBusqueda(self)
         self.busqueda.hide()
@@ -122,6 +144,7 @@ class VentanaPrincipal(QMainWindow):
         capa = QVBoxLayout(centro)
         capa.setContentsMargins(0, 0, 0, 0)
         capa.setSpacing(0)
+        capa.addWidget(self.barra_pestanas)
         capa.addWidget(self.aviso)
         capa.addWidget(self.busqueda)
         capa.addWidget(self.visor, 1)
@@ -174,10 +197,11 @@ class VentanaPrincipal(QMainWindow):
         gestor().cambio.connect(self._tema_cambio)
         self._actualizar_estado()
         # El índice de fuentes de Windows se arma en segundo plano (con caché en disco)
-        self._en_hilo(lambda: (indice_sistema().cargar(), indice_incluidas().cargar()), lambda _r: None,
-                      lambda e: registro().warning("No se pudo indexar las fuentes: %r", e))
+        self._cuando_se_vea(lambda: self._en_hilo(
+            lambda: (indice_sistema().cargar(), indice_incluidas().cargar()), lambda _r: None,
+            lambda e: registro().warning("No se pudo indexar las fuentes: %r", e)))
         if chequear_al_iniciar:
-            QTimer.singleShot(0, self.chequear_dependencias)
+            self._cuando_se_vea(self.chequear_dependencias)
 
     # ------------------------------------------------------------------ acciones
     def _accion(self, texto: str, icono: str | None, atajo=None, slot=None, checkable: bool = False,
@@ -394,6 +418,11 @@ class VentanaPrincipal(QMainWindow):
         foco.setShortcut(QKeySequence("F6"))
         foco.triggered.connect(self.siguiente_region)
         self.addAction(foco)
+        for atajos, paso in ((("Ctrl+Tab", "Ctrl+PgDown"), 1), (("Ctrl+Shift+Tab", "Ctrl+PgUp"), -1)):
+            a = QAction(self)
+            a.setShortcuts([QKeySequence(x) for x in atajos])
+            a.triggered.connect(lambda _=False, d=paso: self.pestana_vecina(d))
+            self.addAction(a)
 
     def _crear_encabezado(self) -> None:
         enc = self.encabezado = Encabezado(self)
@@ -460,6 +489,9 @@ class VentanaPrincipal(QMainWindow):
         self._marcar_tema()
 
     def _conectar(self) -> None:
+        self.visor.primera_pintura.connect(lambda: self._reloj_pintura.start(0))
+        self.barra_pestanas.currentChanged.connect(self._pestana_elegida)
+        self.barra_pestanas.tabMoved.connect(self._pestana_movida)
         self.visor.pagina_actual_cambio.connect(self._pagina_cambio)
         self.visor.zoom_cambio.connect(lambda z: self.etiqueta_zoom.setText(f"{z * 100:.0f}%"))
         self.visor.rect_seleccionado.connect(self._rect_en)
@@ -513,8 +545,11 @@ class VentanaPrincipal(QMainWindow):
         self.encabezado.pestanas.setFocus()
 
     def siguiente_region(self) -> None:
-        """F6: pasa el foco entre la cinta, el visor y la barra lateral."""
-        regiones = [self.encabezado.pestanas, self.visor]
+        """F6: pasa el foco entre la cinta, las pestañas de documentos, el visor y la barra lateral."""
+        regiones = [self.encabezado.pestanas]
+        if self.barra_pestanas.isVisible():
+            regiones.append(self.barra_pestanas)
+        regiones.append(self.visor)
         if self.dock_lateral.isVisible():
             regiones.append(self.lateral.pila.currentWidget())
         actual = QApplication.focusWidget()
@@ -760,9 +795,12 @@ class VentanaPrincipal(QMainWindow):
             self.abrir(ruta)
 
     def abrir(self, ruta: str | Path) -> bool:
-        if not self.cerrar_documento():
-            return False
+        """Abre el PDF en una pestaña nueva. Si ya está abierto, pasa a su pestaña."""
         ruta = Path(ruta)
+        existente = self._pestana_de(ruta)
+        if existente is not None:
+            self._activar(existente)
+            return True
         contrasena = None
         intento = 0
         while True:
@@ -781,15 +819,18 @@ class VentanaPrincipal(QMainWindow):
             except ErrorDocumento as e:
                 self._informar_error("No se pudo abrir", e)
                 return False
-        self.documento = documento
         documento.al_cambiar(self._documento_cambio)
-        self.visor.set_documento(documento)
-        self.miniaturas.set_documento(documento)
-        self.busqueda.set_documento(documento)
-        self._chequear_fuentes_documento()
-        self._actualizar_estado()
-        self.statusBar().showMessage(f"Abierto: {ruta.name} ({documento.doc.page_count} páginas)", 5000)
-        self._actualizar_formulario()
+        pestana = Pestana(documento)
+        self._dejar_activa()
+        self.pestanas.append(pestana)
+        self._agregar_pestana(pestana)
+        vista = posiciones.leer(documento.ruta_original)
+        self._mostrar(pestana, vista)
+        n = documento.doc.page_count
+        mensaje = f"Abierto: {ruta.name} ({n} página{'s' if n != 1 else ''})"
+        if vista and 0 < vista["pagina"] < n:
+            mensaje += f". Seguís en la página {vista['pagina'] + 1}, donde lo dejaste."
+        self.statusBar().showMessage(mensaje, 6000)
         if tiene_formulario(documento.doc):
             n = len(self.panel_formulario.campos)
             self.mostrar_aviso(f"Este PDF tiene un formulario con {n} campo{'s' if n != 1 else ''}. Podés "
@@ -808,6 +849,7 @@ class VentanaPrincipal(QMainWindow):
     # ------------------------------------------------------------------ aviso arriba del visor
     def mostrar_aviso(self, texto: str, boton: str, accion, icono: str = "info") -> None:
         self._accion_del_aviso = accion
+        self._aviso_actual = (texto, boton, accion, icono)
         self.aviso.mostrar(texto, boton, icono)
 
     def _accion_aviso(self) -> None:
@@ -815,7 +857,7 @@ class VentanaPrincipal(QMainWindow):
             self._accion_del_aviso()
 
     def cerrar_documento(self) -> bool:
-        """Cierra el documento actual. Devuelve False si el usuario canceló."""
+        """Cierra la pestaña activa. Devuelve False si el usuario canceló."""
         if self.documento is None:
             return True
         if self.documento.modificado:
@@ -825,7 +867,10 @@ class VentanaPrincipal(QMainWindow):
             if r == "guardar" and not self.guardar_copia():
                 return False
         doc = self.documento
+        pestana = self._activa
+        self._recordar_posicion()
         self.documento = None
+        self._activa = None
         self.analizador.cancelar()
         self.cancelar_ocr()
         self.cancelar_tarea()
@@ -846,8 +891,189 @@ class VentanaPrincipal(QMainWindow):
         self._actualizar_insignia()
         self.panel_firmas.set_colocando(False)
         doc.cerrar()
+        if pestana in self.pestanas:
+            indice = self.pestanas.index(pestana)
+            self.pestanas.pop(indice)
+            self.barra_pestanas.blockSignals(True)
+            self.barra_pestanas.removeTab(indice)
+            self.barra_pestanas.blockSignals(False)
+            if self.pestanas and not self._cerrando_todo:
+                self._mostrar(self.pestanas[min(indice, len(self.pestanas) - 1)])
+        self.barra_pestanas.setVisible(bool(self.pestanas))
         self._actualizar_estado()
         return True
+
+    def cerrar_todas(self) -> bool:
+        """Cierra todas las pestañas (preguntando por las que tienen cambios). False si se canceló.
+        Las que no tienen cambios se cierran sin mostrarlas; las otras se muestran antes de preguntar."""
+        self._cerrando_todo = True
+        try:
+            while self.pestanas:
+                p = self._activa if self._activa in self.pestanas else self.pestanas[0]
+                if p is not self._activa:
+                    if p.documento.modificado:
+                        self._activar(p)
+                    else:
+                        self._dejar_activa()
+                        self._activa, self.documento = p, p.documento
+                if not self.cerrar_documento():
+                    if self._activa is not None and self.visor.documento is not self.documento:
+                        self._mostrar(self._activa)
+                    return False
+            return True
+        finally:
+            self._cerrando_todo = False
+
+    def cerrar_pestana(self, pestana: Pestana) -> bool:
+        """Cierra una pestaña cualquiera: primero la muestra, por si hay que preguntar algo."""
+        if pestana not in self.pestanas:
+            return True
+        self._activar(pestana)
+        return self.cerrar_documento()
+
+    # ------------------------------------------------------------------ pestañas
+    def _pestana_de(self, ruta: Path) -> Pestana | None:
+        try:
+            buscada = ruta.resolve()
+        except OSError:
+            return None
+        for p in self.pestanas:
+            try:
+                if p.documento.ruta_original.samefile(buscada):
+                    return p
+            except OSError:
+                if p.documento.ruta_original == buscada:
+                    return p
+        return None
+
+    def _agregar_pestana(self, pestana: Pestana) -> None:
+        barra = self.barra_pestanas
+        barra.blockSignals(True)
+        indice = barra.addTab(pestana.titulo)
+        barra.setTabToolTip(indice, str(pestana.documento.ruta_original))
+        cerrar = QToolButton(barra)
+        cerrar.setAutoRaise(True)
+        cerrar.setCursor(Qt.CursorShape.ArrowCursor)
+        cerrar.setToolTip("Cerrar documento (Ctrl+W)")
+        cerrar.setAccessibleName(f"Cerrar {pestana.documento.ruta_original.name}")
+        iconos.asignar(cerrar, "x")
+        cerrar.clicked.connect(lambda _=False, p=pestana: self.cerrar_pestana(p))
+        barra.setTabButton(indice, QTabBar.ButtonPosition.RightSide, cerrar)
+        barra.blockSignals(False)
+        barra.show()
+
+    def _dejar_activa(self) -> None:
+        """Guarda en su pestaña el estado del documento activo, antes de mostrar otro."""
+        p = self._activa
+        if p is None:
+            return
+        if self.visor.colocacion is not None:
+            self.cancelar_colocacion()
+        if self.visor.documento is p.documento:
+            p.vista = self.visor.vista()
+        p.redaccion = self.redaccion_pendiente
+        p.aviso = self._aviso_actual if not self.aviso.isHidden() else None
+        if p.analisis == "analizando":
+            # Se analiza solo la pestaña activa: al volver a ella se retoma
+            self.analizador.cancelar()
+            p.analisis = "pendiente"
+        self._recordar_posicion()
+
+    def _mostrar(self, pestana: Pestana, vista: dict | None = None) -> None:
+        """Pone el documento de la pestaña en el visor y los paneles."""
+        self._activa = pestana
+        self.documento = documento = pestana.documento
+        self.bloque = None
+        self._cache_fuentes = {}
+        self.redaccion_pendiente = pestana.redaccion
+        self.visor.set_documento(documento)
+        self.visor.restaurar_vista(vista if vista is not None else pestana.vista)
+        self.miniaturas.set_documento(documento)
+        self.miniaturas.marcar_pagina(self.visor.pagina_actual)
+        self.busqueda.set_documento(documento)
+        self.busqueda.hide()
+        self.panel_firmas.set_colocando(False)
+        self._actualizar_formulario()
+        # Aviso: la redacción pendiente manda; si no, el que tenía la pestaña
+        self.aviso.hide()
+        self._aviso_actual = None
+        if not self.redaccion_pendiente.vacia:
+            self._mostrar_redaccion_pendiente()
+        else:
+            self.visor.mostrar_redaccion([])
+            if pestana.aviso is not None:
+                self.mostrar_aviso(*pestana.aviso)
+        # Fuentes: el resultado guardado, o se analiza ahora
+        if pestana.analisis in ("ok", "error"):
+            self._mostrar_analisis(pestana)
+        else:
+            self._chequear_fuentes_documento(mostrar=pestana.mostrar_faltantes)
+        indice = self.pestanas.index(pestana)
+        self.barra_pestanas.blockSignals(True)
+        self.barra_pestanas.setCurrentIndex(indice)
+        self.barra_pestanas.blockSignals(False)
+        self._actualizar_estado()
+
+    def _activar(self, pestana: Pestana) -> None:
+        if pestana is self._activa:
+            return
+        self._dejar_activa()
+        self._mostrar(pestana)
+
+    def _pestana_elegida(self, indice: int) -> None:
+        if 0 <= indice < len(self.pestanas):
+            self._activar(self.pestanas[indice])
+
+    def _pestana_movida(self, desde: int, hasta: int) -> None:
+        self.pestanas.insert(hasta, self.pestanas.pop(desde))
+
+    def pestana_vecina(self, paso: int) -> None:
+        """Ctrl+Tab / Ctrl+Shift+Tab: la pestaña siguiente o la anterior (da la vuelta)."""
+        if len(self.pestanas) < 2 or self._activa is None:
+            return
+        indice = (self.pestanas.index(self._activa) + paso) % len(self.pestanas)
+        self._activar(self.pestanas[indice])
+
+    def _recordar_posicion(self) -> None:
+        p = self._activa
+        if p is None:
+            return
+        vista = self.visor.vista() if self.visor.documento is p.documento else p.vista
+        if vista is not None:
+            posiciones.guardar(p.documento.ruta_original, vista)
+
+    def _ocupada(self) -> bool:
+        """Hay un diálogo abierto o una tarea en curso: no es momento de cambiar de documento."""
+        return (QApplication.activeModalWidget() is not None or self.proceso_ocr.ocupado
+                or self.proceso_tarea.ocupado or self.visor.colocacion is not None)
+
+    def abrir_varios(self, rutas: list[str]) -> None:
+        """Abre archivos que llegan de afuera (otra instancia, arrastrar y soltar). Si la app está
+        ocupada, espera a que termine para no cambiarle el documento a lo que está en curso."""
+        self._por_abrir.extend(str(r) for r in rutas)
+        self._abrir_pendientes()
+        self.traer_al_frente()
+
+    def _abrir_pendientes(self) -> None:
+        if self._ocupada():
+            if self._por_abrir:
+                self._reloj_por_abrir.start()
+                n = len(self._por_abrir)
+                self.statusBar().showMessage(f"{n} archivo{'s' if n != 1 else ''} para abrir cuando termine "
+                                             "lo que está en curso.", 4000)
+            return
+        self._reloj_por_abrir.stop()
+        while self._por_abrir and not self._ocupada():
+            self.abrir(self._por_abrir.pop(0))
+        if self._por_abrir:
+            self._reloj_por_abrir.start()
+
+    def traer_al_frente(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def showEvent(self, evento) -> None:
         super().showEvent(evento)
@@ -858,7 +1084,14 @@ class VentanaPrincipal(QMainWindow):
             QTimer.singleShot(0, lambda: self.resizeDocks([self.dock_lateral], [ancho], Qt.Orientation.Horizontal))
 
     def closeEvent(self, evento: QCloseEvent) -> None:
-        if self.cerrar_documento():
+        if self.cerrar_todas():
+            # Lo diferido ya no arranca: un hilo lanzado después del cierre podría seguir
+            # corriendo cuando se destruye la ventana (y eso cierra el proceso de golpe)
+            self._cerrada = True
+            self._reloj_pintura.stop()
+            self._tras_pintura = []
+            self._reloj_por_abrir.stop()
+            self._por_abrir = []
             self.analizador.cancelar()
             self.proceso_ocr.cancelar()
             self.proceso_tarea.cancelar()
@@ -877,10 +1110,9 @@ class VentanaPrincipal(QMainWindow):
             evento.acceptProposedAction()
 
     def dropEvent(self, evento) -> None:
-        for u in evento.mimeData().urls():
-            if u.toLocalFile().lower().endswith(".pdf"):
-                self.abrir(u.toLocalFile())
-                break
+        rutas = [u.toLocalFile() for u in evento.mimeData().urls() if u.toLocalFile().lower().endswith(".pdf")]
+        if rutas:
+            self.abrir_varios(rutas)
 
     # ------------------------------------------------------------------ guardar
     def guardar_copia(self) -> bool:
@@ -2396,7 +2628,7 @@ class VentanaPrincipal(QMainWindow):
             self._fin_de_analisis(mostrar)
 
         self._en_hilo(chequear_inicio, listo, fallo)
-        if self.documento is not None:
+        if self.documento is not None and not (self._activa is not None and self._activa.analisis == "analizando"):
             self._chequear_fuentes_documento(mostrar=False)
 
     def _chequear_fuentes_documento(self, mostrar: bool = True) -> None:
@@ -2414,24 +2646,86 @@ class VentanaPrincipal(QMainWindow):
                 registro().error("No se pudo preparar el análisis: %r", e)
                 ruta = doc.ruta_base
         self._mostrar_tras_analisis = mostrar
+        pestana = self._activa
+        if pestana is not None:
+            pestana.analisis = "analizando"
+            pestana.mostrar_faltantes = mostrar
+        self.faltantes.set_documento([])
         self.faltantes.set_estado("documento", "analizando")
         self.panel_fuentes.set_estado("analizando")
         self._estado_analisis()
-        self.analizador.iniciar(ruta, doc.contrasena)
+        self._actualizar_insignia()
+
+        self._pedido_analisis += 1
+        pedido = self._pedido_analisis
+
+        def iniciar() -> None:
+            # Para cuando se ve la primera página, el usuario pudo haber pasado a otra pestaña o
+            # haberlo pedido de nuevo
+            if (pedido == self._pedido_analisis and self._activa is pestana and self.documento is doc
+                    and pestana.analisis == "analizando"):
+                self.analizador.iniciar(ruta, doc.contrasena)
+
+        self._cuando_se_vea(iniciar)
 
     def _analisis_terminado(self, fuentes) -> None:
-        if self.documento is None:
+        pestana = self._activa
+        if self.documento is None or pestana is None:
             return
-        self.panel_fuentes.set_fuentes(fuentes)
-        self.faltantes.set_documento(faltantes_de_fuentes(fuentes))
-        self.faltantes.set_estado("documento", "ok")
+        pestana.analisis, pestana.mensaje_analisis = "ok", ""
+        pestana.fuentes = fuentes
+        pestana.faltantes = faltantes_de_fuentes(fuentes)
+        pestana.mostrar_faltantes = False
+        self._mostrar_analisis(pestana)
         self._fin_de_analisis(self._mostrar_tras_analisis)
 
     def _analisis_fallo(self, mensaje: str) -> None:
         registro().error("Falló el análisis de fuentes: %s", mensaje)
-        self.panel_fuentes.set_estado("error", mensaje)
-        self.faltantes.set_estado("documento", "error", mensaje)
+        pestana = self._activa
+        if pestana is not None:
+            pestana.analisis, pestana.mensaje_analisis = "error", mensaje
+            pestana.mostrar_faltantes = False
+            self._mostrar_analisis(pestana)
         self._fin_de_analisis(self._mostrar_tras_analisis)
+
+    def _mostrar_analisis(self, pestana: Pestana) -> None:
+        """Muestra en los paneles el último análisis de fuentes de la pestaña."""
+        if pestana.analisis == "ok":
+            self.panel_fuentes.set_fuentes(pestana.fuentes)
+            self.faltantes.set_documento(pestana.faltantes)
+            self.faltantes.set_estado("documento", "ok")
+        else:
+            self.panel_fuentes.set_estado("error", pestana.mensaje_analisis)
+            self.faltantes.set_documento([])
+            self.faltantes.set_estado("documento", "error", pestana.mensaje_analisis)
+        self._estado_analisis()
+        self._actualizar_insignia()
+
+    # ------------------------------------------------------------------ después de mostrar la página
+    def _cuando_se_vea(self, funcion) -> None:
+        """Corre `funcion` cuando el visor ya dibujó la primera página del documento abierto, así
+        lo que puede esperar no demora lo que el usuario quiere ver. Si no hay nada que esperar,
+        la corre enseguida; si la página no se dibuja (ventana oculta), a lo sumo en ESPERA_MAX_MS."""
+        esperar = self._arrancando or (self.documento is not None and not self.visor.ya_pinto)
+        if not esperar:
+            funcion()
+            return
+        self._tras_pintura.append(funcion)
+        if not self._reloj_pintura.isActive():
+            self._reloj_pintura.start(ESPERA_MAX_MS)
+
+    def _correr_tras_pintura(self) -> None:
+        self._reloj_pintura.stop()
+        if self._cerrada:
+            self._tras_pintura = []
+            return
+        self._arrancando = False
+        tareas, self._tras_pintura = self._tras_pintura, []
+        for funcion in tareas:
+            try:
+                funcion()
+            except Exception as e:                 # una tarea no puede impedir las demás
+                registro().error("Falló una tarea diferida: %r", e)
 
     def _fin_de_analisis(self, mostrar: bool) -> None:
         self._estado_analisis()
@@ -2484,6 +2778,10 @@ class VentanaPrincipal(QMainWindow):
         if hay:
             marca = "*" if self.documento.modificado else ""
             self.setWindowTitle(f"{self.documento.ruta_original.name}{marca} — {NOMBRE_APP}")
+            if self._activa in self.pestanas:
+                indice = self.pestanas.index(self._activa)
+                if self.barra_pestanas.tabText(indice) != self._activa.titulo:
+                    self.barra_pestanas.setTabText(indice, self._activa.titulo)
             self.etiqueta_pagina.setText(f"Página {self.visor.pagina_actual + 1} de {self.visor.cantidad_paginas}")
         else:
             self.setWindowTitle(NOMBRE_APP)

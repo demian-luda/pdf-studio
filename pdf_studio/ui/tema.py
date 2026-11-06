@@ -119,6 +119,15 @@ QTabBar#pestanas_cinta::tab:selected {{ color: {p.texto}; border-bottom: 2px sol
 QTabBar#pestanas_cinta::tab:hover {{ color: {p.texto}; }}
 QTabBar#pestanas_cinta::tab:focus {{ border: 2px solid {p.acento}; border-radius: {r}px; }}
 
+/* Pestañas de documentos (arriba del visor) */
+QTabBar#pestanas_documentos {{ background: {p.superficie}; border-bottom: 1px solid {p.borde}; }}
+QTabBar#pestanas_documentos::tab {{ background: transparent; color: {p.texto_suave}; border: none;
+    border-bottom: 2px solid transparent; padding: {pad}px {pad * 2}px; margin-right: 1px; max-width: {ind * 18}px; }}
+QTabBar#pestanas_documentos::tab:selected {{ color: {p.texto}; background: {p.fondo};
+    border-bottom: 2px solid {p.acento}; }}
+QTabBar#pestanas_documentos::tab:hover {{ color: {p.texto}; }}
+QTabBar#pestanas_documentos::tab:focus {{ border: 2px solid {p.acento}; border-radius: {r}px; }}
+
 QToolBar {{ background: {p.superficie}; border: none; spacing: {pad}px; padding: {pad}px; }}
 QToolBar::separator {{ background: {p.borde}; width: 1px; margin: {pad}px {pad * 2}px; }}
 QToolButton {{ background: transparent; color: {p.texto}; border: 1px solid transparent; border-radius: {r}px;

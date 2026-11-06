@@ -8,6 +8,7 @@ computadora: los documentos no se suben a ningún lado.
 ## Qué hace
 
 - **Ver y buscar**: zoom, miniaturas, búsqueda, resaltado y notas. Tema claro, oscuro o según Windows.
+- **Varios PDFs en pestañas**: con PDF Studio abierto, un doble clic en otro PDF lo suma como pestaña en la misma ventana. Cada PDF se vuelve a abrir en la página y el zoom donde lo dejaste.
 - **Editar y mover texto** con la misma fuente. Solo cambia lo que editaste: el resto de la línea conserva sus códigos, su fuente y su posición. Si la fuente embebida está recortada, se usa la del sistema, incluidas las fuentes variables; si no está, se ofrece instalarla o reemplazarla.
 - **Caracteres sin glifo** (los rectángulos de muchas listas exportadas desde Word): se conservan tal cual, o se reemplazan o quitan en todo el documento, con vista previa.
 - **Reemplazar una fuente en todo el documento** (modo armónico): se priorizan las métricamente compatibles, así no se corren las líneas.
@@ -49,6 +50,8 @@ Get-FileHash .\PDFStudio-0.2.0-windows.zip -Algorithm SHA256
 **Firma de código:** pedimos la firma gratuita para proyectos de código abierto de [SignPath Foundation](https://signpath.org/). Cuando la aprueben, los releases van a decir: *Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)*. La política de firma está en [CODE_SIGNING.md](CODE_SIGNING.md).
 
 **Para actualizar:** cerrá PDF Studio, descargá el ZIP de la versión nueva, descomprimilo y hacé doble clic en `Instalar.cmd`. Reemplaza la versión anterior; no hace falta desinstalarla, y tus firmas y tu configuración en `%APPDATA%\PDFStudio` se conservan. Qué cambió en cada versión está en [CHANGELOG.md](CHANGELOG.md).
+
+**Para usarlo como lector predeterminado:** clic derecho en cualquier PDF → *Abrir con* → *Elegir otra aplicación* → **PDF Studio** → *Siempre*. El instalador no lo hace por su cuenta.
 
 **Para desinstalar:** *Configuración → Aplicaciones → PDF Studio → Desinstalar*. Las firmas que guardaste quedan en `%APPDATA%\PDFStudio`.
 

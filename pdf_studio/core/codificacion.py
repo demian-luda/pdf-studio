@@ -19,8 +19,6 @@ import unicodedata
 from dataclasses import dataclass, field
 
 import pymupdf
-from fontTools import agl
-from fontTools.encodings.StandardEncoding import StandardEncoding
 
 from pdf_studio.core.fuentes import ESTANDAR_14, Embebido, clasificar_fuente, clave_fuente, _normalizar
 
@@ -134,6 +132,10 @@ def _anchos_cid(doc: pymupdf.Document, xref_desc: int) -> tuple[dict[int, float]
 
 def _mapa_encoding(doc: pymupdf.Document, xref: int) -> dict[int, str]:
     """{código: unicode} según /Encoding de una fuente simple."""
+    # fontTools recién acá: cargarlo al arrancar demora la primera página
+    from fontTools import agl
+    from fontTools.encodings.StandardEncoding import StandardEncoding
+
     t, v = doc.xref_get_key(xref, "Encoding")
     base = "StandardEncoding"
     diferencias = ""

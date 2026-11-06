@@ -2,7 +2,7 @@
 
 Comprueba, sin mostrar ventanas, que el .exe tenga todo lo que necesita: los recursos
 (íconos, fuentes, diccionarios), abrir y guardar con la verificación de fidelidad, las
-tareas en otro proceso (--tarea), el corrector, Word (.docx), la firma digital, OpenCV y
+tareas en otro proceso (--tarea), la instancia única, el corrector, Word (.docx), la firma digital, OpenCV y
 ocrmypdf. Escribe {prueba: "ok" | "omitida: …" | "error: …"} en el JSON y termina con 0 si todo anduvo.
 No usa ningún archivo del usuario: todo se arma en una carpeta temporal.
 """
@@ -62,6 +62,45 @@ def _tarea(tmp: Path) -> str:
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     salida = json.loads((tmp / "resultado.json").read_text(encoding="utf-8"))
     assert salida.get("ok"), salida.get("error", "sin resultado")
+    return "ok"
+
+
+def _instancia_unica(tmp: Path) -> str:
+    """Un segundo proceso de la app le pasa su PDF a esta (que hace de instancia abierta) y
+    termina: prueba el canal local de punta a punta (QtNetwork incluido en el .exe)."""
+    import time
+
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+    from PySide6.QtWidgets import QApplication
+
+    from pdf_studio import procesos
+    from pdf_studio.instancia import ServidorInstancia, nombre_canal
+    QApplication.instance() or QApplication([])
+    canal = nombre_canal(f"autoprueba-{os.getpid()}")
+    servidor = ServidorInstancia(canal)
+    assert servidor.escuchar(), "no se pudo abrir el canal local"
+    recibidos: list[str] = []
+    servidor.archivos_recibidos.connect(recibidos.extend)
+    pdf = _pdf(tmp / "c.pdf")
+    if getattr(sys, "frozen", False):
+        comando = [sys.executable, str(pdf)]
+    else:
+        comando = [sys.executable, "-m", "pdf_studio", str(pdf)]
+    entorno = dict(procesos.entorno(), PDFSTUDIO_CANAL=canal, QT_QPA_PLATFORM="offscreen")
+    proceso = subprocess.Popen(comando, env=entorno, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        limite = time.monotonic() + 90
+        while time.monotonic() < limite and (proceso.poll() is None or not recibidos):
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 100)
+            if proceso.poll() is not None and not recibidos:
+                break
+        assert recibidos, "el segundo proceso no pasó el archivo a la instancia abierta"
+        assert Path(recibidos[0]).resolve() == pdf.resolve(), f"llegó otra ruta: {recibidos!r}"
+        assert proceso.wait(timeout=30) == 0, "el segundo proceso no terminó bien"
+    finally:
+        if proceso.poll() is None:
+            proceso.kill()
+        servidor.cerrar()
     return "ok"
 
 
@@ -172,6 +211,7 @@ def _ocr_real(tmp: Path) -> str:
 
 
 PRUEBAS = {"recursos": _recursos, "guardar con fidelidad": _guardar, "tarea en otro proceso": _tarea,
+           "instancia única": _instancia_unica,
            "fuente variable": _fuente_variable,
            "corrector ortográfico": _ortografia, "Word (.docx)": _word, "firma digital": _firma,
            "OpenCV": _opencv, "ocrmypdf": _ocrmypdf, "OCR con Tesseract": _ocr_real}

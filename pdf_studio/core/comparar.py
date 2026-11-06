@@ -16,7 +16,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pymupdf
 
 from pdf_studio.config import DIR_FUENTES_INCLUIDAS
@@ -188,6 +187,7 @@ def comparar_texto(doc_a: pymupdf.Document, doc_b: pymupdf.Document) -> list[Cam
 # ---------------------------------------------------------------------- visual
 def _zonas(mascara: np.ndarray) -> list[tuple[int, int, int, int]]:
     """Agrupa los píxeles distintos en rectángulos (en píxeles): celdas vecinas se unen."""
+    import numpy as np   # diferido: acelera el arranque
     alto, ancho = mascara.shape
     filas, columnas = -(-alto // CELDA), -(-ancho // CELDA)
     relleno = np.zeros((filas * CELDA, columnas * CELDA), dtype=bool)
@@ -217,6 +217,7 @@ def _zonas(mascara: np.ndarray) -> list[tuple[int, int, int, int]]:
 
 def comparar_pagina_visual(pag_a: pymupdf.Page, pag_b: pymupdf.Page, dpi: int = DPI_VISUAL
                            ) -> DiferenciaVisual | None:
+    import numpy as np   # diferido: acelera el arranque
     pix_a = pag_a.get_pixmap(dpi=dpi, alpha=False, annots=True)
     pix_b = pag_b.get_pixmap(dpi=dpi, alpha=False, annots=True)
     if (pix_a.width, pix_a.height) != (pix_b.width, pix_b.height):

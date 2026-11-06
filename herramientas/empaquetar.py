@@ -43,7 +43,7 @@ EXCLUIR = ["tkinter", "pytest", "_pytest", "pytestqt", "pymupdf4llm", "pymupdf_l
            "PySide6.QtWebChannel", "PySide6.QtWebSockets", "PySide6.QtQuick", "PySide6.QtQml",
            "PySide6.QtQuickWidgets", "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia",
            "PySide6.QtMultimediaWidgets", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
-           "PySide6.QtPdfWidgets", "PySide6.QtNetwork", "PySide6.QtSql", "PySide6.QtTest",
+           "PySide6.QtPdfWidgets", "PySide6.QtSql", "PySide6.QtTest",
            "PySide6.QtBluetooth", "PySide6.QtPositioning", "PySide6.QtSensors", "PySide6.QtSerialPort",
            "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets"]
 
@@ -54,13 +54,14 @@ METADATOS = ["ocrmypdf", "pikepdf", "pyhanko", "pymupdf", "pypdfium2", "img2pdf"
 
 
 # Lo que PyInstaller trae arrastrado por plugins de Qt que la app no usa (teclado virtual →
-# Quick/Qml/OpenGL; imágenes PDF de Qt → QtPdf/QtNetwork), el video de OpenCV y el OpenGL por
-# software. Se borra después de armar; la autoprueba y la prueba de la ventana lo validan.
+# Quick/Qml/OpenGL; imágenes PDF de Qt → QtPdf), el video de OpenCV y el OpenGL por software.
+# Se borra después de armar; la autoprueba y la prueba de la ventana lo validan. QtNetwork sí
+# va: la instancia única (pdf_studio/instancia.py) usa su canal local.
 PODAR = ["cv2/opencv_videoio_ffmpeg*.dll", "PySide6/opengl32sw.dll",
          "PySide6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll", "PySide6/Qt6VirtualKeyboard.dll",
          "PySide6/Qt6Quick.dll", "PySide6/Qt6Qml*.dll", "PySide6/Qt6OpenGL.dll",
          "PySide6/plugins/imageformats/qpdf.dll", "PySide6/Qt6Pdf.dll",
-         "PySide6/plugins/generic/qtuiotouchplugin.dll", "PySide6/Qt6Network.dll"]
+         "PySide6/plugins/generic/qtuiotouchplugin.dll"]
 TRADUCCIONES = ("_es.qm", "_en.qm")       # de las de Qt, solo español e inglés
 
 

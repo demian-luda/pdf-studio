@@ -1,6 +1,7 @@
 """Punto de entrada de PDF Studio."""
 from __future__ import annotations
 
+import os
 import sys
 
 
@@ -34,21 +35,30 @@ def main(argv: list[str] | None = None) -> int:
         multiprocessing.freeze_support()
         from ocrmypdf.__main__ import run as ocrmypdf
         return ocrmypdf(argv[2:])
-    import importlib
+    # Se verifica que estén sin importarlos: importarlos acá demoraría cada arranque
+    import importlib.util
     for modulo, paquete in (("PySide6.QtWidgets", "PySide6"), ("pymupdf", "pymupdf"), ("numpy", "numpy"),
                             ("PIL", "Pillow"), ("fontTools", "fonttools")):
         try:
-            importlib.import_module(modulo)
-        except ImportError as e:
+            encontrado = importlib.util.find_spec(modulo) is not None
+        except (ImportError, ValueError) as e:
             return _falta_paquete(paquete, e)
+        if not encontrado:
+            return _falta_paquete(paquete, ImportError(f"No se encontró el módulo {modulo}"))
+
+    rutas = [a for a in argv[1:] if not a.startswith("--")]
+
+    # Instancia única: si PDF Studio ya está abierto, le pasa los archivos y termina enseguida
+    # (antes de cargar pymupdf o armar la ventana)
+    instancia = None
+    if not os.environ.get("PDFSTUDIO_SIN_INSTANCIA_UNICA"):
+        from pdf_studio.instancia import Instancia
+        instancia = Instancia()
+        if instancia.entregar_a_otra(rutas):
+            return 0
 
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
-
-    from pdf_studio import NOMBRE_APP
-    from pdf_studio.config import DIR_RECURSOS
-    from pdf_studio.ui.tema import gestor
-    from pdf_studio.ui.ventana_principal import VentanaPrincipal
 
     # Windows agrupa la ventana con su propio ícono en la barra de tareas (y no con el de Python)
     try:
@@ -58,6 +68,17 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     app = QApplication(argv)
+    # Escucha cuanto antes: los procesos que se lancen mientras esta arranca esperan su «ok»
+    servidor = instancia.servir(app) if instancia is not None and instancia.principal else None
+    recibidos: list[str] = []
+    if servidor is not None:
+        servidor.archivos_recibidos.connect(recibidos.extend)
+
+    from pdf_studio import NOMBRE_APP
+    from pdf_studio.config import DIR_RECURSOS
+    from pdf_studio.ui.tema import gestor
+    from pdf_studio.ui.ventana_principal import VentanaPrincipal
+
     app.setApplicationName(NOMBRE_APP)
     app.setOrganizationName("PDFStudio")
     app.setWindowIcon(QIcon(str(DIR_RECURSOS / "logo.ico")))
@@ -69,10 +90,20 @@ def main(argv: list[str] | None = None) -> int:
     sys.excepthook = ManejadorErrores()
 
     ventana = VentanaPrincipal()
+    if servidor is not None:
+        servidor.archivos_recibidos.disconnect()
+        servidor.archivos_recibidos.connect(ventana.abrir_varios)
     ventana.show()
-    if len(argv) > 1:
-        ventana.abrir(argv[1])
-    return app.exec()
+    if rutas:
+        ventana.abrir(rutas[0])
+    if rutas[1:] or recibidos:
+        ventana.abrir_varios(rutas[1:] + recibidos)
+    codigo = app.exec()
+    if servidor is not None:
+        servidor.cerrar()
+    if instancia is not None:
+        instancia.liberar()
+    return codigo
 
 
 if __name__ == "__main__":

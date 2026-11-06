@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-import numpy as np
 import pymupdf
 
 from pdf_studio.config import DPI_FIDELIDAD
@@ -102,6 +101,7 @@ def comparar_paginas(pag_a: pymupdf.Page, pag_b: pymupdf.Page, dpi: int,
         return max(total, pix_b.width * pix_b.height), total, "cambió el tamaño de la página"
     if pix_a.samples_mv == pix_b.samples_mv:
         return 0, total, ""
+    import numpy as np      # recién acá: cargarlo al arrancar demora la primera página
     a = np.frombuffer(pix_a.samples_mv, dtype=np.uint8).reshape(pix_a.height, pix_a.width, pix_a.n)
     b = np.frombuffer(pix_b.samples_mv, dtype=np.uint8).reshape(pix_b.height, pix_b.width, pix_b.n)
     if excluir:

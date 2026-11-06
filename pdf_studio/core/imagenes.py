@@ -11,7 +11,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pymupdf
 from PIL import Image, ImageOps
 
@@ -25,12 +24,14 @@ EXTENSIONES_IMAGEN = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 
 # ---------------------------------------------------------------------- quitar fondo
 def luminancia(img: Image.Image) -> np.ndarray:
+    import numpy as np   # diferido: acelera el arranque
     rgb = np.asarray(img.convert("RGB"), dtype=np.float32)
     return rgb[..., 0] * 0.299 + rgb[..., 1] * 0.587 + rgb[..., 2] * 0.114
 
 
 def umbral_automatico(lum: np.ndarray) -> int:
     """Umbral de Otsu entre la tinta y el papel, acotado a un rango razonable."""
+    import numpy as np   # diferido: acelera el arranque
     hist, _ = np.histogram(lum, bins=256, range=(0, 256))
     total = lum.size
     suma_total = np.dot(np.arange(256), hist)
@@ -63,6 +64,7 @@ class OpcionesFondo:
 
 def quitar_fondo(img: Image.Image, opciones: OpcionesFondo | None = None) -> Image.Image:
     """Convierte una firma escaneada (fondo claro) en un PNG con transparencia."""
+    import numpy as np   # diferido: acelera el arranque
     op = opciones or OpcionesFondo()
     img = ImageOps.exif_transpose(img)
     rgba = img.convert("RGBA")
@@ -88,6 +90,7 @@ def quitar_fondo(img: Image.Image, opciones: OpcionesFondo | None = None) -> Ima
 
 
 def recortar_transparente(img: Image.Image, margen: int = 4) -> Image.Image:
+    import numpy as np   # diferido: acelera el arranque
     alfa = np.asarray(img.getchannel("A"))
     filas = np.where(alfa.max(axis=1) > 8)[0]
     cols = np.where(alfa.max(axis=0) > 8)[0]
@@ -99,6 +102,7 @@ def recortar_transparente(img: Image.Image, margen: int = 4) -> Image.Image:
 
 
 def tiene_transparencia(img: Image.Image) -> bool:
+    import numpy as np   # diferido: acelera el arranque
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         return int(np.asarray(img.convert("RGBA").getchannel("A")).min()) < 250
     return False
