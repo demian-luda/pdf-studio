@@ -47,6 +47,9 @@ def cache_aislada(tmp_path, monkeypatch):
     from pdf_studio.core import fuentes
     monkeypatch.setattr(config, "DIR_CACHE", tmp_path / "cache")
     monkeypatch.setattr(fuentes, "_indice_incluidas", None)
+    # Las posiciones de lectura tampoco van al %APPDATA% real
+    from pdf_studio import posiciones
+    monkeypatch.setattr(posiciones, "_archivo", lambda: tmp_path / "appdata" / "posiciones.json")
     yield
 
 

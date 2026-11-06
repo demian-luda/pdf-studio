@@ -85,6 +85,7 @@ class Visor(QGraphicsView):
     texto_clic = Signal(int, object)          # (página, punto sin rotar) en modo Editar texto
     texto_doble_clic = Signal(int, object)
     seleccion_movida = Signal(int, float, float)   # (página, dx, dy) en coordenadas sin rotar
+    primera_pintura = Signal()                # se dibujó la primera página del documento puesto
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -109,6 +110,8 @@ class Visor(QGraphicsView):
         self._redaccion: list[tuple[int, pymupdf.Rect]] = []        # zonas marcadas, aún sin aplicar
         self._marcas_redaccion: list[QGraphicsRectItem] = []
         self._pagina_actual = 0
+        self.ya_pinto = False                 # ¿ya se dibujó alguna página del documento actual?
+        self._vista_pendiente: dict | None = None   # vista a restaurar cuando el visor tenga tamaño
         self._modo = Modo.MANO
         self._inicio_seleccion: QPointF | None = None
         self._rect_seleccion: QGraphicsRectItem | None = None
@@ -129,12 +132,68 @@ class Visor(QGraphicsView):
     def set_documento(self, documento: Documento | None) -> None:
         self.cancelar_colocacion()
         self.documento = documento
+        self.ya_pinto = False
+        self._vista_pendiente = None
         self._resultados = []
         self._resultado_actual = -1
         self._pagina_actual = 0
         self.recargar()
         self.ajustar_ancho()
         self.verticalScrollBar().setValue(self.verticalScrollBar().minimum())
+
+    # ------------------------------------------------------------------ vista (para retomar la lectura)
+    def vista(self) -> dict | None:
+        """Página, zoom (o ajuste) y cuánto de la página quedó arriba de la vista (0 a 1)."""
+        if not self.items:
+            return None
+        if self._vista_pendiente is not None:
+            return dict(self._vista_pendiente)   # todavía no se aplicó: sigue valiendo esa
+        indice = self._pagina_actual
+        r = self.items[indice].sceneBoundingRect()
+        arriba = self.mapToScene(0, 0).y()
+        desplazamiento = (arriba - r.top()) / r.height() if r.height() > 0 else 0.0
+        return {"pagina": indice, "zoom": round(self._zoom, 4), "ajuste": self._ajuste,
+                "desplazamiento": round(max(0.0, min(1.0, desplazamiento)), 4)}
+
+    def restaurar_vista(self, vista: dict | None) -> None:
+        """Vuelve a una vista guardada con vista(). Si el visor todavía no tiene su tamaño final
+        (ventana sin mostrar), la aplica cuando lo tenga."""
+        if not vista or not self.items:
+            return
+        if not self.isVisible():
+            self._vista_pendiente = dict(vista)
+            return
+        self._vista_pendiente = None
+        pagina = min(max(0, int(vista.get("pagina", 0))), len(self.items) - 1)
+        ajuste = vista.get("ajuste")
+        if ajuste == "ancho":
+            self.ajustar_ancho()
+        elif ajuste == "pagina":
+            self._pagina_actual = pagina
+            self.ajustar_pagina()
+        else:
+            try:
+                self.set_zoom(float(vista.get("zoom", self._zoom)))
+            except (TypeError, ValueError):
+                pass
+        r = self.items[pagina].sceneBoundingRect()
+        try:
+            fraccion = max(0.0, min(1.0, float(vista.get("desplazamiento", 0.0))))
+        except (TypeError, ValueError):
+            fraccion = 0.0
+        if fraccion > 0:
+            # El borde superior de la vista queda en el mismo punto de la página que antes
+            alto_vista = self.viewport().height() / self.transform().m11()
+            centro_x = self.mapToScene(self.viewport().rect().center()).x()
+            self.centerOn(centro_x, r.top() + fraccion * r.height() + alto_vista / 2)
+            self._set_pagina_actual(pagina)
+        else:
+            self.ir_a_pagina(pagina)
+
+    def showEvent(self, evento) -> None:
+        super().showEvent(evento)
+        if self._vista_pendiente is not None:
+            self.restaurar_vista(self._vista_pendiente)
 
     def recargar(self) -> None:
         """Rearma la escena (después de abrir, deshacer, rotar...). Mantiene la página visible."""
@@ -189,6 +248,9 @@ class Visor(QGraphicsView):
             return
         try:
             self._pintar_pagina(painter, indice, rect, expuesto, escala)
+            if not self.ya_pinto:
+                self.ya_pinto = True
+                self.primera_pintura.emit()
         except Exception as e:
             # Una página dañada no puede tirar un error en cada repintado: se avisa una vez
             from pdf_studio.ui.errores import registro

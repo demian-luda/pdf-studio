@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 
-import numpy as np
 
 from pdf_studio.core.documento import ErrorDocumento, Limitacion
 
@@ -126,6 +125,7 @@ class InformeEscaneo:
 def leer_imagen(ruta: str | Path, rotacion: int = 0) -> np.ndarray:
     """La foto como BGR, derecha según su EXIF (los celulares guardan la rotación aparte) y
     girada `rotacion` grados en sentido horario."""
+    import numpy as np   # diferido: acelera el arranque
     from PIL import Image, ImageOps
 
     ruta = Path(ruta)
@@ -146,6 +146,7 @@ def leer_imagen(ruta: str | Path, rotacion: int = 0) -> np.ndarray:
 
 
 def girar(img: np.ndarray, rotacion: int) -> np.ndarray:
+    import numpy as np   # diferido: acelera el arranque
     vueltas = (rotacion // 90) % 4
     return np.ascontiguousarray(np.rot90(img, -vueltas)) if vueltas else img
 
@@ -163,6 +164,7 @@ def reducir(img: np.ndarray, lado: int) -> tuple[np.ndarray, float]:
 # ---------------------------------------------------------------------- papel
 def ordenar_esquinas(puntos) -> np.ndarray:
     """Arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda."""
+    import numpy as np   # diferido: acelera el arranque
     p = np.asarray(puntos, dtype=np.float32).reshape(4, 2)
     suma, resta = p.sum(axis=1), np.diff(p, axis=1).ravel()
     return np.array([p[np.argmin(suma)], p[np.argmin(resta)], p[np.argmax(suma)], p[np.argmax(resta)]],
@@ -170,6 +172,7 @@ def ordenar_esquinas(puntos) -> np.ndarray:
 
 
 def _cuadrilatero(contorno, area_minima: float):
+    import numpy as np   # diferido: acelera el arranque
     c = cv2()
     area = c.contourArea(contorno)
     if area < area_minima:
@@ -227,6 +230,7 @@ def detectar_papel(img: np.ndarray) -> np.ndarray | None:
 def _resalta_del_fondo(gris: np.ndarray, puntos: np.ndarray, diferencia: float = 18.0) -> bool:
     """El borde del papel es más claro que lo que lo rodea. Descarta, por ejemplo, un
     recuadro dibujado dentro de una hoja que ocupa toda la imagen."""
+    import numpy as np   # diferido: acelera el arranque
     c = cv2()
     mascara = np.zeros(gris.shape, np.uint8)
     c.fillConvexPoly(mascara, ordenar_esquinas(puntos).astype(np.int32), 255)
@@ -246,12 +250,14 @@ def normalizar_esquinas(esquinas: np.ndarray, img: np.ndarray) -> list[tuple[flo
 
 
 def a_pixeles(esquinas, img: np.ndarray) -> np.ndarray:
+    import numpy as np   # diferido: acelera el arranque
     h, w = img.shape[:2]
     return np.array([(x * w, y * h) for x, y in esquinas], dtype=np.float32)
 
 
 def corregir_perspectiva(img: np.ndarray, esquinas: np.ndarray) -> np.ndarray:
     """La zona del papel, vista de frente."""
+    import numpy as np   # diferido: acelera el arranque
     c = cv2()
     tl, tr, br, bl = ordenar_esquinas(esquinas)
     ancho = int(round(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl))))
@@ -266,6 +272,7 @@ def corregir_perspectiva(img: np.ndarray, esquinas: np.ndarray) -> np.ndarray:
 def angulo_inclinacion(img: np.ndarray) -> float:
     """Inclinación del texto en grados (positivo = girado en sentido antihorario), buscando
     el ángulo en el que las filas de texto quedan más marcadas (perfil de proyección)."""
+    import numpy as np   # diferido: acelera el arranque
     c = cv2()
     chica, _ = reducir(img, 900)
     gris = c.cvtColor(chica, c.COLOR_BGR2GRAY) if chica.ndim == 3 else chica
@@ -312,6 +319,7 @@ def _fondo(img: np.ndarray) -> np.ndarray:
 
 
 def _estirar(gris: np.ndarray, bajo: float = 1.0, alto: float = 99.5) -> np.ndarray:
+    import numpy as np   # diferido: acelera el arranque
     a, b = np.percentile(gris, (bajo, alto))
     if b - a < 1:
         return gris
@@ -403,6 +411,7 @@ def _codificar(img: np.ndarray, mejora: Mejora) -> bytes:
 
 def crear_pdf(fotos: list[AjusteFoto], opciones: OpcionesEscaneo, destino: Path, progreso=None) -> InformeEscaneo:
     """Arma el PDF (una página por foto) y lo escribe en `destino` de forma atómica."""
+    import numpy as np   # diferido: acelera el arranque
     import pymupdf
 
     if not fotos:

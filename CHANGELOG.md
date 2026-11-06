@@ -2,6 +2,29 @@
 
 Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Agregado
+
+- **Pestañas.** Varios PDFs abiertos en la misma ventana. Con PDF Studio abierto, un doble clic en otro
+  PDF lo suma como pestaña nueva, en lugar de abrir otra ventana; abrir varios seleccionados o soltarlos
+  sobre la ventana también. Las pestañas se cierran con su botón o Ctrl+W (con aviso si hay cambios sin
+  guardar), se reordenan arrastrándolas y se recorren con Ctrl+Tab y Ctrl+Shift+Tab.
+- **Retomar la lectura.** Al volver a abrir un PDF, aparece en la última página y con el zoom que tenía.
+  Se recuerdan los últimos 300 archivos, solo en esta PC (`%APPDATA%\PDFStudio\posiciones.json`).
+
+### Cambiado
+
+- **Arranque más rápido.** Desde el doble clic hasta ver la primera página: de 1,65 s a 0,8 s. Un segundo
+  PDF con la app abierta se ve en 0,3 s. Los íconos se dibujan recién cuando hacen falta, numpy, pikepdf y
+  fontTools se cargan al usarlos, y el análisis de fuentes, el chequeo de dependencias y el índice de
+  fuentes del sistema empiezan después de mostrar la primera página.
+
+### Corregido
+
+- Al arrancar con un PDF, el análisis de fuentes se lanzaba dos veces, y el segundo no mostraba el panel
+  Faltantes aunque faltara algo importante.
+
 ## [0.2.0] - 2026-11-03
 
 ### Agregado

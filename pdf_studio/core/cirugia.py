@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-import pikepdf
 import pymupdf
 
 from pdf_studio.core.codificacion import CodificadorFuente, construir_codificador
@@ -94,6 +93,7 @@ class _NoSePuedeLeer(Exception):
 
 def _recorrer(doc: pymupdf.Document, instrucciones: list, fuentes: dict, referente: int, recursos,
               glifos: list[GlifoFlujo], en_forma: bool, profundidad: int = 0) -> None:
+    import pikepdf   # diferido: acelera el arranque
     if profundidad > MAX_ANIDADO:
         raise _NoSePuedeLeer
     estado = _Estado()
@@ -189,6 +189,7 @@ class Flujo:
 
 def leer_flujo(doc: pymupdf.Document, pag: pymupdf.Page) -> Flujo | None:
     """Alinea el contenido de la página con la traza de MuPDF. None si no coinciden."""
+    import pikepdf   # diferido: acelera el arranque
     try:
         glifos: list[GlifoFlujo] = []
         with pikepdf.Pdf.new() as aux:
@@ -280,6 +281,7 @@ def reescribir(doc: pymupdf.Document, pagina: int, reemplazos: list[Reemplazo], 
 
     adelantos: {índice de instrucción: número de TJ al comienzo} para correr lo que sigue en la
     línea cuando el texto nuevo no entra. nombre_de_xref: da el nombre de recurso de una fuente del PDF."""
+    import pikepdf   # diferido: acelera el arranque
     pag = doc[pagina]
     nombres_nuevos: dict[str, str] = {}
     corregir: dict[str, CodificadorFuente | None] = {}
@@ -372,6 +374,7 @@ def reescribir(doc: pymupdf.Document, pagina: int, reemplazos: list[Reemplazo], 
 
 def _instrucciones_de(m: Mostrar, atomos: list, nombre_de) -> list:
     """Vuelve a armar un operador a partir de sus átomos, cambiando de fuente solo si hace falta."""
+    import pikepdf   # diferido: acelera el arranque
     salida: list = []
     if m.operador == '"' and len(m.operandos) == 3:
         salida.append(_instruccion("Tw", [m.operandos[0]]))
@@ -434,6 +437,7 @@ def _decimal(valor: float) -> Decimal:
 
 
 def _instruccion(operador: str, operandos: list) -> pikepdf.ContentStreamInstruction:
+    import pikepdf   # diferido: acelera el arranque
     return pikepdf.ContentStreamInstruction(operandos, pikepdf.Operator(operador))
 
 

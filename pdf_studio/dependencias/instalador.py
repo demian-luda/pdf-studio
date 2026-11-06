@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +44,7 @@ def _sin_progreso(_h: int, _t: int, _m: str) -> None:
 
 # ---------------------------------------------------------------------- descargas
 def _abrir(url: str, metodo: str = "GET"):
+    import urllib.request   # diferido: acelera el arranque
     pedido = urllib.request.Request(url, method=metodo, headers={"User-Agent": AGENTE})
     return urllib.request.urlopen(pedido, timeout=60)
 

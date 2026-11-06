@@ -636,6 +636,103 @@ def probar_archivo(ruta_original: Path, pruebas) -> list[tuple[str, str, str]]:
     return filas
 
 
+def prueba_pestanas(archivos: list[Path]) -> list[tuple[str, str, str]]:
+    """Todos los archivos abiertos a la vez, en pestañas de una misma ventana (sobre copias):
+    cada uno se ve, se lo lleva a otra página y zoom, se pasa por todas las pestañas y al volver
+    tiene que seguir ahí; después se cierran y al reabrirlos retoman esa posición.
+    [(archivo, resultado, nota)], sin contenido."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QCoreApplication, QEventLoop
+    from PySide6.QtWidgets import QApplication
+
+    from pdf_studio import posiciones
+    from pdf_studio.core.imagenes import BibliotecaFirmas
+    from pdf_studio.ui.ventana_principal import VentanaPrincipal
+    QApplication.instance() or QApplication([])
+
+    def procesar(segundos: float = 0.05) -> None:
+        limite = time.monotonic() + segundos
+        while time.monotonic() < limite:
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 20)
+
+    filas: dict[str, tuple[str, str, str]] = {}
+    with tempfile.TemporaryDirectory(prefix="pdfstudio_robustez_pestanas_") as tmp:
+        tmp = Path(tmp)
+        archivo_posiciones = tmp / "posiciones.json"
+        posiciones_original = posiciones._archivo
+        posiciones._archivo = lambda: archivo_posiciones
+        v = VentanaPrincipal(chequear_al_iniciar=False, biblioteca=BibliotecaFirmas(tmp / "firmas"))
+        v._informar = lambda *a, **k: None
+        v._preguntar_guardar_cambios = lambda: "descartar"
+        v._pedir_contrasena = lambda *a, **k: None
+        v.resize(1100, 800)
+        v.show()
+        try:
+            copias = []
+            for i, ruta in enumerate(archivos):
+                copia = tmp / f"{i:03d}_{ruta.name}"
+                shutil.copy2(ruta, copia)
+                try:
+                    if v.abrir(copia):
+                        copias.append((ruta.name, copia))
+                    else:
+                        filas[ruta.name] = (ruta.name, OMITIDA, "no se abre (protegido o dañado)")
+                except Exception as e:
+                    filas[ruta.name] = (ruta.name, FALLA, f"etapa «abrir en pestaña»: {type(e).__name__}")
+                procesar()
+            # A cada uno, otra página y otro zoom
+            esperado = {}
+            for nombre, copia in copias:
+                try:
+                    p = v._pestana_de(copia)
+                    v._activar(p)
+                    procesar()
+                    pagina = (v.visor.cantidad_paginas - 1) // 2
+                    v.visor.set_zoom(1.2)
+                    v.visor.ir_a_pagina(pagina)
+                    esperado[nombre] = v.visor.pagina_actual
+                except Exception as e:
+                    filas[nombre] = (nombre, FALLA, f"etapa «mover la vista»: {type(e).__name__}")
+            # Recorrer todas las pestañas y volver: cada una sigue donde estaba
+            for _ in range(len(v.pestanas)):
+                v.pestana_vecina(1)
+                procesar()
+            for nombre, copia in copias:
+                if nombre in filas:
+                    continue
+                try:
+                    v._activar(v._pestana_de(copia))
+                    procesar()
+                    if v.visor.pagina_actual != esperado[nombre]:
+                        filas[nombre] = (nombre, FALLA, "al volver a la pestaña no estaba en su página")
+                except Exception as e:
+                    filas[nombre] = (nombre, FALLA, f"etapa «volver a la pestaña»: {type(e).__name__}")
+            if not v.cerrar_todas():
+                return [("(ventana)", FALLA, "no se pudieron cerrar todas las pestañas")]
+            # Reabrir: retoman la posición guardada
+            for nombre, copia in copias:
+                if nombre in filas:
+                    continue
+                try:
+                    v.abrir(copia)
+                    procesar()
+                    if v.visor.pagina_actual != esperado[nombre]:
+                        filas[nombre] = (nombre, FALLA, "al reabrir no volvió a su página")
+                    else:
+                        filas[nombre] = (nombre, OK, "")
+                    v.cerrar_documento()
+                except Exception as e:
+                    filas[nombre] = (nombre, FALLA, f"etapa «reabrir»: {type(e).__name__}")
+        finally:
+            v.cerrar_todas()
+            v.close()
+            v.deleteLater()
+            procesar(0.3)
+            posiciones._archivo = posiciones_original
+    return [filas[r.name] for r in archivos if r.name in filas]
+
+
 def main(argv: list[str]) -> int:
     opciones = [a for a in argv[1:] if a.startswith("--")]
     posicionales = [a for a in argv[1:] if not a.startswith("--")]
@@ -659,6 +756,15 @@ def main(argv: list[str]) -> int:
         for nombre, resultado, nota in filas:
             totales[resultado] += 1
             print(f"      {nombre:14} {resultado:10} {nota}", flush=True)
+    if not solo or "pestañas" in solo:
+        inicio = time.monotonic()
+        filas = prueba_pestanas(archivos)
+        print(f"[pestañas  ] {len(archivos)} archivos abiertos a la vez ({time.monotonic() - inicio:.1f} s)",
+              flush=True)
+        for nombre, resultado, nota in filas:
+            totales[resultado] += 1
+            if resultado != OK:
+                print(f"      {nombre:40} {resultado:10} {nota}", flush=True)
     intactos = all(_hash(p) == h for p, h in hashes.items())
     print()
     print(f"Archivos: {len(archivos)} · Pruebas OK: {totales[OK]} · OK con aviso: {totales[AVISO]} · "

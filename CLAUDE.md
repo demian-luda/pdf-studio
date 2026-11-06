@@ -56,9 +56,11 @@ Usar un entorno virtual (`.venv`). Versiones fijadas en `requirements.txt` (desa
 ```
 pdf_studio/
   app.py                  # punto de entrada (también procesos auxiliares: --tarea, --ocrmypdf, --autoprueba)
+  instancia.py            # instancia única: un doble clic con la app abierta suma una pestaña
+  posiciones.py           # última página y zoom de cada PDF
   autoprueba.py           # prueba el .exe armado, sin interfaz
   config.py, procesos.py, analisis_proceso.py
-  ui/                     # ventanas, paneles, visor, miniaturas, diálogos, tema, íconos, cinta
+  ui/                     # ventanas, pestañas, paneles, visor, miniaturas, diálogos, tema, íconos, cinta
   core/
     documento.py          # abrir/guardar, historial deshacer/rehacer
     fidelidad.py          # comparación de píxeles
@@ -85,6 +87,23 @@ tests/
   fuentes_prueba/         # fuente variable libre para las pruebas (Quicksand, OFL)
 .github/workflows/release.yml   # arma y publica cada versión
 ```
+
+## Arranque y pestañas
+
+- **Arranque rápido**: lo pesado se importa dentro de las funciones que lo usan (numpy, pikepdf, fontTools,
+  OpenCV, ocrmypdf, pyHanko, python-docx, spylls, urllib). `test_abrir_la_ventana_no_carga_lo_pesado` lo
+  vigila. `pdf_studio/__init__.py` bloquea `pymupdf.layout` y `pymupdf4llm`, que pymupdf 2.0 importa solo y
+  la app no usa (el .exe los excluye). Los íconos se dibujan bajo demanda (`_MotorIcono`).
+- Lo que puede esperar (índice de fuentes, chequeo de dependencias, análisis de fuentes) se lanza con
+  `_cuando_se_vea`: después de que el visor dibuja la primera página.
+- Medir: `python herramientas/medir_arranque.py <pdf>` (doble clic → primera página, mediana de 5).
+- **Instancia única** (`instancia.py`): mutex con nombre de Windows + `QLocalServer`. Los procesos nuevos
+  pasan sus rutas a la instancia abierta y terminan sin cargar pymupdf. `PDFSTUDIO_SIN_INSTANCIA_UNICA=1`
+  la desactiva. El .exe incluye QtNetwork por esto.
+- **Pestañas** (`ui/pestanas.py`): un solo visor y un solo juego de paneles; cada `Pestana` guarda la vista,
+  la redacción pendiente, el análisis de fuentes y el aviso de su documento. `self.documento` es siempre
+  el de la pestaña activa. Solo se analiza la pestaña activa. Lo que llega con un diálogo o una tarea en
+  curso espera (`abrir_varios`).
 
 ## Detector de dependencias (pieza central)
 
