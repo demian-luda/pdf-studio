@@ -7,6 +7,8 @@
 name: Pruebas
 
 on:
+  push:
+    branches: ["memoria"]        # TEMPORAL: para medir en la rama; se quita al fusionar
   workflow_dispatch:
     inputs:
       marcadores:
