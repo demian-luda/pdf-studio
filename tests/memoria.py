@@ -1,7 +1,8 @@
 """Registro de memoria de la suite (plugin de pytest; se activa con PDFSTUDIO_MEMORIA=<archivo.tsv>).
 
-Después de cada test anota la memoria del proceso (RSS y memoria privada) y la de sus
-subprocesos vivos. Al terminar cada archivo de tests hace un gc.collect() y cuenta lo que
+Después de cada test anota la memoria del proceso (RSS y memoria privada), la de sus
+subprocesos vivos y el pico de todo el árbol (tests + subprocesos: OCR, Tesseract, tareas)
+durante el test, muestreado cada 0,25 s. Al terminar cada archivo de tests hace un gc.collect() y cuenta lo que
 sigue vivo: documentos de MuPDF, Documento de la app, ventanas principales, widgets de Qt
 e hilos. Si algo crece de forma sostenida, se ve en la columna correspondiente.
 
@@ -22,6 +23,26 @@ _proceso = None
 _filas: list[str] = []
 _ultimo_modulo: str | None = None
 _inicio = time.monotonic()
+_pico_arbol = 0
+_candado = threading.Lock()
+
+
+def _muestrear() -> None:
+    """Hilo de fondo: el pico de memoria de todo el árbol de procesos desde el último test."""
+    global _pico_arbol
+    while True:
+        try:
+            total = _proceso.memory_info().rss
+            for h in _proceso.children(recursive=True):
+                try:
+                    total += h.memory_info().rss
+                except Exception:
+                    pass
+            with _candado:
+                _pico_arbol = max(_pico_arbol, total)
+        except Exception:
+            pass
+        time.sleep(0.25)
 
 
 def _mb(n: int) -> str:
@@ -70,12 +91,13 @@ def pytest_configure(config):
         return
     import psutil
     _proceso = psutil.Process()
-    _filas.append("seg\ttest\trss_mb\tprivada_mb\tsubprocesos_mb\tvivos")
+    _filas.append("seg\ttest\trss_mb\tprivada_mb\tsubprocesos_mb\tvivos\tpico_arbol_mb")
+    threading.Thread(target=_muestrear, name="memoria", daemon=True).start()
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
-    global _ultimo_modulo
+    global _ultimo_modulo, _pico_arbol
     yield
     if _proceso is None:
         return
@@ -86,7 +108,10 @@ def pytest_runtest_protocol(item, nextitem):
     if siguiente != modulo:                     # último test del archivo: inventario completo
         vivos = " ".join(f"{k}={v}" for k, v in _vivos().items())
         rss, privada, hijos = _memoria()
-    _filas.append(f"{time.monotonic() - _inicio:.0f}\t{item.nodeid}\t{_mb(rss)}\t{_mb(privada)}\t{_mb(hijos)}\t{vivos}")
+    with _candado:
+        pico, _pico_arbol = max(_pico_arbol, rss + hijos), 0
+    _filas.append(f"{time.monotonic() - _inicio:.0f}\t{item.nodeid}\t{_mb(rss)}\t{_mb(privada)}\t{_mb(hijos)}"
+                  f"\t{vivos}\t{_mb(pico)}")
 
 
 def pytest_unconfigure(config):

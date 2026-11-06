@@ -2,6 +2,14 @@
 
 Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Corregido
+
+- **Memoria al cerrar pestañas.** Una pestaña cerrada quedaba retenida con su documento: con 20 PDFs
+  abiertos y cerrados tres veces quedaban 57 documentos en memoria y la app crecía unos 8 MB por
+  vuelta. Ahora se liberan todos y, al cerrar la última pestaña, también el caché de MuPDF.
+
 ## [0.3.0] - 2026-11-06
 
 ### Agregado

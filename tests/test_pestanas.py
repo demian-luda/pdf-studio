@@ -318,3 +318,43 @@ def test_posiciones_recuerda_las_ultimas_y_tolera_un_archivo_roto(tmp_path, monk
     posiciones.guardar(tmp_path / "6.pdf", {"pagina": 1, "zoom": 1.0, "ajuste": None})
     assert posiciones.leer(tmp_path / "6.pdf")["pagina"] == 1
     assert not list(tmp_path.glob(".posiciones-*"))      # no quedan temporales
+
+
+# ---------------------------------------------------------------------- memoria
+def test_cerrar_pestanas_libera_sus_documentos(ventana, copia_pdf, qtbot):
+    """Una pestaña cerrada no queda retenida (antes la retenía la lambda de su botón de
+    cerrar, que Qt no destruye al sacar la pestaña), ni su documento de MuPDF."""
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QToolButton
+
+    from pdf_studio.core.documento import Documento
+    from pdf_studio.ui.pestanas import Pestana
+
+    def vivos(tipo) -> int:
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if type(o) is tipo)
+
+    def botones() -> int:
+        return len(ventana.barra_pestanas.findChildren(QToolButton))
+
+    sin_pestanas = botones()                 # los de desplazamiento propios de QTabBar
+    for _ in range(2):
+        for nombre in ("texto_varias_paginas.pdf", "tablas.pdf", "imagen_fondo.pdf"):
+            ventana.abrir(copia_pdf(nombre))
+        assert vivos(Pestana) == 3 and botones() == sin_pestanas + 3
+        ventana.cerrar_pestana(ventana.pestanas[0])      # con su botón (lo mismo que el clic)
+        assert ventana.cerrar_todas()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert vivos(Pestana) == 0 and vivos(Documento) == 0
+        assert botones() == sin_pestanas
+
+
+def test_el_boton_de_cerrar_encuentra_su_pestana_despues_de_moverla(ventana, copia_pdf):
+    from PySide6.QtWidgets import QTabBar
+    ventana.abrir(copia_pdf("texto_varias_paginas.pdf"))
+    ventana.abrir(copia_pdf("tablas.pdf"))
+    ventana.barra_pestanas.moveTab(1, 0)
+    ventana.barra_pestanas.tabButton(0, QTabBar.ButtonPosition.RightSide).click()
+    assert [p.documento.ruta_original.name for p in ventana.pestanas] == ["texto_varias_paginas.pdf"]

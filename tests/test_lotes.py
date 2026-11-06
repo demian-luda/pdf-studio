@@ -16,6 +16,9 @@ from pdf_studio.core.marcas import OpcionesMarca, OpcionesNumeracion
 from tests.conftest import hash_archivo
 from tests.test_conversion import requiere_tesseract
 
+# Usa Tesseract, OpenCV, ocrmypdf o arma procesos aparte: en la PC, de a un archivo
+pytestmark = pytest.mark.pesado
+
 
 def _pdf(ruta: Path, paginas: int = 2, texto: str = "Informe") -> Path:
     ruta.parent.mkdir(parents=True, exist_ok=True)

@@ -19,17 +19,21 @@ def resumir(texto: str, titulo: str = "Memoria de la suite") -> str:
         if len(partes) < 6:
             continue
         seg, test, rss, privada, hijos, vivos = partes[:6]
-        filas.append((int(seg), test, int(rss), int(privada), int(hijos), vivos))
+        arbol = int(partes[6]) if len(partes) > 6 and partes[6] else int(rss) + int(hijos)
+        filas.append((int(seg), test, int(rss), int(privada), int(hijos), vivos, arbol))
     if not filas:
         return f"## {titulo}\n\nSin datos.\n"
     pico = max(filas, key=lambda f: f[3])
     pico_hijos = max(filas, key=lambda f: f[4])
+    pico_arbol = max(filas, key=lambda f: f[6])
     lineas = [f"## {titulo}", "",
               f"- Tests: {len(filas)} · duración: {filas[-1][0] // 60} min {filas[-1][0] % 60} s",
               f"- Memoria privada del proceso de tests: primera {filas[0][3]} MB · pico **{pico[3]} MB** "
               f"(en `{pico[1]}`) · final **{filas[-1][3]} MB**",
               f"- RSS: primera {filas[0][2]} MB · final {filas[-1][2]} MB",
-              f"- Pico de subprocesos (OCR, análisis, tareas): {pico_hijos[4]} MB (en `{pico_hijos[1]}`)",
+              f"- Subprocesos vivos al terminar un test: hasta {pico_hijos[4]} MB (en `{pico_hijos[1]}`)",
+              f"- Pico de todo el árbol durante un test (tests + OCR, Tesseract, tareas): "
+              f"**{pico_arbol[6]} MB** (en `{pico_arbol[1]}`)",
               "", "### Al terminar cada archivo", "",
               "| Archivo | Privada (MB) | Δ en el archivo | Vivos después de gc |", "|---|---:|---:|---|"]
     anterior = filas[0][3]
@@ -41,6 +45,9 @@ def resumir(texto: str, titulo: str = "Memoria de la suite") -> str:
     subidas = sorted(((filas[i][3] - filas[i - 1][3], filas[i][1]) for i in range(1, len(filas))), reverse=True)
     lineas += ["", "### Tests que más subieron la memoria", "", "| Δ (MB) | Test |", "|---:|---|"]
     lineas += [f"| {d:+d} | `{t}` |" for d, t in subidas[:12]]
+    arboles = sorted(((f[6], f[1]) for f in filas), reverse=True)
+    lineas += ["", "### Picos de todo el árbol de procesos", "", "| Pico (MB) | Test |", "|---:|---|"]
+    lineas += [f"| {m} | `{t}` |" for m, t in arboles[:12]]
     return "\n".join(lineas) + "\n"
 
 
