@@ -55,14 +55,16 @@ Get-FileHash .\PDFStudio-0.3.1-windows.zip -Algorithm SHA256
 
 **Para desinstalar:** *Configuración → Aplicaciones → PDF Studio → Desinstalar*. Las firmas que guardaste quedan en `%APPDATA%\PDFStudio`.
 
-### Herramientas opcionales
+### Programas incluidos
 
-PDF Studio avisa cuando falta alguna. Desde el panel *Faltantes* se instalan con un botón o con el comando de PowerShell que muestra:
+PDF Studio funciona completo desde el primer arranque: no hace falta instalar nada más.
 
-| Para qué | Qué | Comando |
+| Para qué | Qué | Dónde |
 |---|---|---|
-| OCR y «A Word editable» | Tesseract con español | `winget install --id tesseract-ocr.tesseract -e`. El idioma español (`spa.traineddata`) se descarga desde el panel *Faltantes*. |
-| Compresión «alta» | Ghostscript | Instalador oficial, desde el panel *Faltantes*. |
+| OCR y «A Word editable» | Tesseract 5.5.3 con español e inglés (modelos `tessdata_best`) | Carpeta `tesseract` junto a `PDFStudio.exe` |
+| Compresión «máxima» | Ghostscript 10.08.0 | Carpeta `ghostscript` junto a `PDFStudio.exe` |
+
+La app usa siempre estos, aunque haya otros instalados en Windows, y no instala nada en el sistema ni pide permisos de administrador. Si alguno faltara (por ejemplo, si se borró su carpeta), el panel *Faltantes* lo vuelve a bajar con el botón **Instalar**: por HTTPS, desde su fuente oficial, con versión fija y verificado con SHA-256.
 
 ## Desarrollo
 
@@ -73,6 +75,7 @@ cd C:\Proyectos\pdf-studio
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1          # si PowerShell lo bloquea: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 python -m pip install -r requirements.txt
+python -m pdf_studio.dependencias.programas   # baja y arma Tesseract y Ghostscript en programas\ (sin administrador)
 python -m pdf_studio.app               # abre la app
 ```
 
@@ -94,7 +97,8 @@ python herramientas\empaquetar.py
 
 El script:
 - arma la carpeta `dist\PDF Studio\` con PyInstaller, en modo carpeta (*onedir*);
-- corre la autoprueba del `.exe` (`PDFStudio.exe --autoprueba resultado.json`), que revisa los recursos, el guardado con fidelidad, las tareas en otro proceso, el corrector, Word, la firma digital y OpenCV;
+- corre la autoprueba del `.exe` (`PDFStudio.exe --autoprueba resultado.json`), que revisa los recursos, el guardado con fidelidad, las tareas en otro proceso, el corrector, Word, la firma digital, OpenCV, un OCR real con el Tesseract incluido y una compresión con el Ghostscript incluido;
+- copia `programas\tesseract` y `programas\ghostscript` al lado del `.exe` (si faltan, primero `python -m pdf_studio.dependencias.programas`);
 - genera `dist\PDFStudio-<versión>-windows.zip`, que lleva el instalador, la licencia y `LICENCIAS-TERCEROS.txt`.
 
 Si querés solo la carpeta, sin el ZIP, agregá `--sin-zip`.

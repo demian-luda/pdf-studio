@@ -3,6 +3,7 @@
 
 Uso (con el .venv):
     .\\.venv\\Scripts\\python.exe -m pip install -r requirements-empaquetado.txt
+    .\\.venv\\Scripts\\python.exe -m pdf_studio.dependencias.programas   # Tesseract y Ghostscript → programas\\
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py            # arma, prueba y comprime
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py --sin-zip  # solo la carpeta
     ... empaquetar.py --sin-ventana          # sin abrir la ventana del .exe (servidores de CI)
@@ -13,6 +14,8 @@ SOURCE_DATE_EPOCH el ZIP es reproducible. También se escribe dist\\SHA256SUMS.t
 
 Resultado:
     dist\\PDF Studio\\PDFStudio\\PDFStudio.exe   (la aplicación)
+    dist\\PDF Studio\\PDFStudio\\tesseract\\     (Tesseract incluido, con español e inglés)
+    dist\\PDF Studio\\PDFStudio\\ghostscript\\   (Ghostscript incluido)
     dist\\PDF Studio\\Instalar.cmd               (copia a %LOCALAPPDATA%\\Programs y crea accesos directos)
     dist\\PDFStudio-<versión>-windows.zip        (todo lo anterior, para compartir)
 """
@@ -63,6 +66,59 @@ PODAR = ["cv2/opencv_videoio_ffmpeg*.dll", "PySide6/opengl32sw.dll",
          "PySide6/plugins/imageformats/qpdf.dll", "PySide6/Qt6Pdf.dll",
          "PySide6/plugins/generic/qtuiotouchplugin.dll"]
 TRADUCCIONES = ("_es.qm", "_en.qm")       # de las de Qt, solo español e inglés
+
+# Bibliotecas que trae el instalador oficial de Tesseract para Windows (las que tesseract.exe
+# realmente usa) y su licencia. Si una versión nueva trae otra, la prueba de licencias lo avisa.
+LICENCIAS_DLL_TESSERACT = {
+    "libarchive": "libarchive: BSD-2-Clause", "libb2": "libb2 (BLAKE2): CC0-1.0",
+    "libbrotlicommon": "Brotli: MIT", "libbrotlidec": "Brotli: MIT", "libbz2": "bzip2: bzip2-1.0.6",
+    "libcurl": "curl: curl", "libdeflate": "libdeflate: MIT", "libexpat": "Expat: MIT",
+    "libgcc_s_seh": "GCC runtime: GPL-3.0-or-later WITH GCC-exception-3.1",
+    "libstdc++": "GCC runtime (libstdc++): GPL-3.0-or-later WITH GCC-exception-3.1",
+    "libgif": "giflib: MIT", "libiconv": "GNU libiconv: LGPL-2.1-or-later",
+    "libidn2": "libidn2: LGPL-3.0-or-later OR GPL-2.0-or-later", "libintl": "gettext (libintl): LGPL-2.1-or-later",
+    "libjbig": "JBIG-KIT: GPL-2.0-or-later", "libjpeg": "libjpeg-turbo: IJG AND BSD-3-Clause AND Zlib",
+    "libleptonica": "Leptonica: BSD-2-Clause", "liblerc": "LERC: Apache-2.0", "liblz4": "LZ4: BSD-2-Clause",
+    "liblzma": "XZ Utils (liblzma): 0BSD", "libopenjp2": "OpenJPEG: BSD-2-Clause", "libpng16": "libpng: Libpng-2.0",
+    "libpsl": "libpsl: MIT", "libsharpyuv": "libwebp: BSD-3-Clause", "libwebp": "libwebp: BSD-3-Clause",
+    "libwebpmux": "libwebp: BSD-3-Clause", "libssh2": "libssh2: BSD-3-Clause",
+    "libtesseract": "Tesseract: Apache-2.0", "libtiff": "LibTIFF: libtiff",
+    "libunistring": "GNU libunistring: LGPL-3.0-or-later OR GPL-2.0-or-later",
+    "libwinpthread": "mingw-w64 winpthreads: MIT AND BSD-3-Clause",
+    "libzstd": "Zstandard: BSD-3-Clause OR GPL-2.0-only", "zlib1": "zlib: Zlib",
+}
+
+
+def _base_dll(nombre: str) -> str:
+    """«libtiff-6.dll» → «libtiff»; «libstdc++-6.dll» → «libstdc++»."""
+    import re
+    return re.sub(r"(-[\d.]+)+$", "", nombre[:-4]) if nombre.lower().endswith(".dll") else nombre
+
+
+def programas_incluidos() -> Path:
+    """Carpeta con Tesseract y Ghostscript ya armados y verificados (ver dependencias/programas.py)."""
+    from pdf_studio.dependencias import programas
+    base = programas.carpeta_del_repo()
+    for p in programas.PROGRAMAS:
+        if not programas.esta_completo(base / p.clave, p):
+            raise SystemExit(f"Falta {p.titulo} en {base / p.clave}. Armalo con:\n"
+                             f"  python -m pdf_studio.dependencias.programas")
+    return base
+
+
+def copiar_programas(carpeta: Path, base: Path | None = None) -> None:
+    """Copia Tesseract y Ghostscript al lado del .exe y verifica que no les falte ninguna DLL."""
+    from pdf_studio.dependencias import programas
+    base = base or programas_incluidos()
+    for p in programas.PROGRAMAS:
+        destino = carpeta / p.clave
+        if destino.exists():
+            shutil.rmtree(destino)
+        shutil.copytree(base / p.clave, destino)
+        archivos = [n for n in (p.ejecutable, "gsdll64.dll") if (destino / n).is_file()]
+        _usados, faltan = programas.dependencias(destino, archivos)
+        if faltan:
+            raise SystemExit(f"A {p.titulo} le faltan bibliotecas: {', '.join(sorted(faltan))}")
 
 
 def podar(carpeta: Path) -> int:
@@ -134,8 +190,37 @@ def licencias_de_terceros() -> str:
                "- Fuentes Liberation (SIL OFL 1.1), Carlito y Caladea (SIL OFL 1.1): pdf_studio/recursos/fuentes",
                "- Diccionarios es_AR (RLA-ES: GPL-3.0 / LGPL-3.0 / MPL-1.1) y en_US (SCOWL: MIT y BSD): "
                "pdf_studio/recursos/diccionarios",
-               "", "Tesseract y Ghostscript no vienen incluidos: la app ofrece instalarlos con winget."]
-    return "\n".join(lineas) + "\n"
+               ""]
+    return "\n".join(lineas + programas_de_terceros()) + "\n"
+
+
+def programas_de_terceros(base: Path | None = None) -> list[str]:
+    """Sección de Tesseract y Ghostscript (en las carpetas tesseract y ghostscript, junto al .exe)."""
+    from pdf_studio.dependencias import programas as pr
+    base = base or pr.carpeta_del_repo()
+    etiqueta_gs = pr.INSTALADOR_GHOSTSCRIPT.url.rsplit("/", 2)[-2]
+    lineas = ["Programas incluidos (se ejecutan aparte; versión fija, descargados de su fuente oficial y "
+              "verificados con SHA-256):",
+              f"- Tesseract OCR {pr.TESSERACT_VERSION}: Apache-2.0. Texto: PDFStudio/tesseract/LICENSE-tesseract.txt. "
+              f"Fuente: https://github.com/tesseract-ocr/tesseract/tree/{pr.TESSERACT_VERSION}",
+              f"  Instalador: {pr.INSTALADOR_TESSERACT.url} (SHA-256 {pr.INSTALADOR_TESSERACT.sha256})",
+              f"- Modelos de idioma {pr.TESSDATA_VERSION} (spa, eng): Apache-2.0. Texto: "
+              "PDFStudio/tesseract/LICENSE-tessdata_best.txt. Fuente: https://github.com/tesseract-ocr/tessdata_best",
+              "- Bibliotecas que trae el instalador oficial de Tesseract para Windows (PDFStudio/tesseract/*.dll):"]
+    carpeta_t = base / "tesseract"
+    dlls = sorted(p.name for p in carpeta_t.glob("*.dll")) if carpeta_t.is_dir() else []
+    for nombre in dlls:
+        lineas.append(f"    {nombre}: {LICENCIAS_DLL_TESSERACT.get(_base_dll(nombre), 'SIN LICENCIA REGISTRADA')}")
+    if not dlls:
+        lineas.append("    (se listan al armar, con los programas preparados)")
+    lineas += [f"- Ghostscript {pr.GHOSTSCRIPT_VERSION} (Artifex Software): AGPL-3.0. "
+               "Texto: PDFStudio/ghostscript/COPYING-ghostscript.txt. "
+               f"Fuente: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/tag/{etiqueta_gs}",
+               f"  Instalador: {pr.INSTALADOR_GHOSTSCRIPT.url} (SHA-256 {pr.INSTALADOR_GHOSTSCRIPT.sha256})",
+               "- Runtime de Microsoft Visual C++ (" + ", ".join(pr.RUNTIME_MSVC) + ") en PDFStudio/ghostscript: "
+               "archivos redistribuibles de Microsoft, los mismos que trae PySide6.",
+               "", "Tesseract y Ghostscript se usan siempre desde estas carpetas: no se instala nada en Windows."]
+    return lineas
 
 
 def armar() -> Path:
@@ -148,6 +233,7 @@ def armar() -> Path:
     if not exe.is_file():
         raise SystemExit("PyInstaller no generó el .exe")
     print(f"Podado: {podar(carpeta) / 1024 / 1024:.0f} MB que la app no usa")
+    copiar_programas(carpeta)
     instalador = RAIZ / "instalador"
     for archivo in ("instalar.ps1", "desinstalar.ps1", "Instalar.cmd"):
         shutil.copy2(instalador / archivo, SALIDA / archivo)
@@ -237,8 +323,10 @@ def main(argv: list[str]) -> int:
         # Solo comprimir una carpeta ya armada (p. ej. la que devuelve SignPath con el .exe firmado)
         carpeta = Path(argv[argv.index("--zip-desde") + 1])
         zip_ = comprimir(carpeta)
-        print(f"ZIP: {zip_}\n{sumas_sha256(zip_).read_text(encoding='utf-8')}")
+        print(f"ZIP: {zip_} ({zip_.stat().st_size / 1024 / 1024:.1f} MB)\n"
+              f"{sumas_sha256(zip_).read_text(encoding='utf-8')}")
         return 0
+    programas_incluidos()            # antes de armar: si faltan, se avisa enseguida
     exe = armar()
     print(f"Listo: {exe} ({tamano(SALIDA)})")
     if "--sin-prueba" not in argv and not autoprueba(exe):

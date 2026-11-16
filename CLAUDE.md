@@ -18,7 +18,7 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
   - Si alguna dependencia no tiene soporte para 3.13, avisar antes de cambiar de versión de Python.
 - Ejecutar desde el código: `python -m pdf_studio`. La copia instalada está en `%LOCALAPPDATA%\Programs\PDF Studio` y no cambia con el código.
 - Git ya está configurado, con un repo en GitHub (rama `main`, remoto `origin`).
-- winget está disponible.
+- La app no depende de winget (en algunas PC no está): nada de lo que use la app o el instalador puede requerirlo.
 
 ## Flujo con Git
 
@@ -33,7 +33,7 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
 3. **Fidelidad visual verificable.** Después de cada guardado, se compara el render de las páginas no editadas contra el original (diferencia de píxeles = 0). Si hay diferencia, se avisa.
 4. **Deshacer/Rehacer** en todas las operaciones de edición.
 5. **Nunca fallar en silencio.** Si falta una fuente, librería o herramienta, se muestra qué falta y el **comando de PowerShell listo para copiar** que lo instala.
-6. **Instalación asistida, siempre con confirmación explícita.** La app puede instalar dependencias por su cuenta (botón "Instalar"), pero nunca sin que el usuario confirme después de ver: nombre, origen de la descarga, licencia, tamaño y dónde se instala. Siempre se ofrece también "Copiar comando". Las fuentes se instalan solo para el usuario (sin administrador) y quedan disponibles sin reiniciar; si Windows necesita permisos de administrador (Tesseract, Ghostscript), se deja que aparezca su propio aviso.
+6. **Instalación asistida, siempre con confirmación explícita.** La app puede instalar dependencias por su cuenta (botón "Instalar"), pero nunca sin que el usuario confirme después de ver: nombre, origen de la descarga, licencia, tamaño y dónde se instala. Siempre se ofrece también "Copiar comando". Las fuentes se instalan solo para el usuario (sin administrador) y quedan disponibles sin reiniciar; Tesseract y Ghostscript vienen incluidos con la app; si faltaran, «Instalar» los baja por HTTPS a la carpeta de la app, sin administrador.
 
 ## Stack
 
@@ -42,7 +42,7 @@ Idioma de la interfaz: **español rioplatense**. Comentarios del código en espa
 | Interfaz | PySide6 |
 | Motor PDF (render, texto, imágenes, redacción, formularios) | PyMuPDF (`pymupdf`) |
 | Guardados seguros / estructura | `pikepdf` |
-| OCR | `ocrmypdf` + Tesseract (idiomas `spa` + `eng`) |
+| OCR | `ocrmypdf` + Tesseract incluido (idiomas `spa` + `eng`, `tessdata_best`) |
 | Firma digital con certificado | `pyHanko` |
 | Imágenes (quitar fondo de firmas) | `Pillow`, `numpy` |
 | Análisis de fuentes e instancias variables | `fontTools` |
@@ -113,8 +113,9 @@ Se ejecuta al iniciar la app y al abrir cada PDF. Muestra un panel "Faltantes" c
 
 Casos a cubrir:
 - **Paquetes de Python faltantes** → `pip install <paquete>` (usando el pip del .venv).
-- **Tesseract** → comando `winget` con el ID `tesseract-ocr.tesseract` (verificado en octubre de 2026; volver a verificar con `winget search tesseract` si se cambia). Incluir también el comando para descargar `spa.traineddata` a la carpeta tessdata con `Invoke-WebRequest`.
-- **Ghostscript** (opcional, para compresión agresiva) → no está en winget: se baja el instalador oficial de la última versión.
+- **Tesseract y Ghostscript vienen incluidos** (`dependencias/programas.py`): versión, URL oficial y SHA-256 fijos; se abre el instalador oficial con 7-Zip (sin ejecutarlo) y se copia solo el programa y las DLL que importa. Se buscan SOLO en las carpetas de la app (junto al .exe; `programas/` del repo; `%LOCALAPPDATA%\PDFStudio\programas`), nunca en el sistema. Si faltan, «Instalar» los baja por HTTPS, verificados, sin administrador; «Copiar comando» corre ese mismo código. Ghostscript lleva el runtime de Visual C++ (de PySide6). ocrmypdf no usa Ghostscript (`--output-type pdf`, `--rasterizer pypdfium`).
+  - Desde el código: `python -m pdf_studio.dependencias.programas` (arma `programas/`, que no se commitea).
+  - Para actualizar una versión: cambiar URL, SHA-256 y tamaño en `programas.py`; si Tesseract trae otra DLL, registrar su licencia en `LICENCIAS_DLL_TESSERACT` (`herramientas/empaquetar.py`).
 - **Fuentes**: por cada fuente del PDF, informar si está **embebida completa**, **embebida como subconjunto** (recortada) o **no embebida**, y si está instalada en Windows. Un subconjunto se detecta también por su cobertura real de glifos, aunque no tenga el prefijo `ABCDEF+`.
   - Si es una fuente libre (Google Fonts u otras de licencia abierta): generar un comando de PowerShell que la descargue e instale para el usuario actual (`%LOCALAPPDATA%\Microsoft\Windows\Fonts` + registro en `HKCU`), sin pedir permisos de administrador.
   - Si es una fuente comercial o desconocida: no inventar descargas; ofrecer la sustitución (ver abajo).
@@ -187,7 +188,7 @@ Para PDFs con fuente privada: opción **"Reemplazar fuente en todo el documento"
 ## Extras
 
 - **Páginas**: unir, separar, rotar, eliminar y reordenar arrastrando miniaturas; insertar páginas en blanco o desde otro PDF.
-- **Comprimir**: niveles bajo/medio/alto (recompresión de imágenes, limpieza de objetos con `garbage=4, deflate=True`); Ghostscript opcional. Mostrar el tamaño antes y después.
+- **Comprimir**: niveles bajo/medio/alto (recompresión de imágenes, limpieza de objetos con `garbage=4, deflate=True`); máxima con el Ghostscript incluido. Mostrar el tamaño antes y después.
 - **Redacción real**: marcar áreas o buscar texto (por ejemplo, DNI o CUIT con expresiones regulares) y **eliminar el contenido del archivo**, no solo taparlo. Verificar después que el texto ya no se pueda extraer.
 - **Formularios**: detectar campos, completarlos y opcionalmente "aplanarlos".
 - **Marca de agua y numeración**: texto o imagen, opacidad, posición, rango de páginas; formatos de numeración como "Página X de Y".
@@ -219,6 +220,7 @@ La PC del usuario tiene 15 GB y con su uso normal (navegadores, Claude, WSL) sue
   - Livianos (~540 tests, todos juntos): `python -m pytest -m "not red and not pesado"`.
   - Pesados (marcador `pesado`: Tesseract, OpenCV, ocrmypdf, autoprueba), **de a un archivo**: `python -m pytest tests\test_ocr.py` (también `test_conversion`, `test_escaneo`, `test_empaquetado`, `test_lotes`, `test_tablas_poe`). Cada uno llega a ~0,5-0,7 GB contando sus subprocesos.
   - Un archivo nuevo que use Tesseract, OpenCV, ocrmypdf o procesos aparte lleva `pytestmark = pytest.mark.pesado`.
+  - En GitHub los workflows arman Tesseract y Ghostscript y corren con `PDFSTUDIO_EXIGIR_PROGRAMAS=1`: un test que se saltee por falta de ellos cuenta como falla.
 - **Medir la memoria:** `PDFSTUDIO_MEMORIA=memoria.tsv python -m pytest -p tests.memoria ...` y `python herramientas/resumen_memoria.py memoria.tsv`. Muestra la memoria tras cada test, el pico de todo el árbol de procesos y lo que sigue vivo al terminar cada archivo (documentos, ventanas, widgets, hilos).
 - `conftest.py` destruye después de cada test las ventanas que quedaron: pytest-qt las cierra pero no las destruye, y una `VentanaPrincipal` cerrada sigue viva (sus acciones tienen lambdas que la referencian desde C++).
 - **Memoria de la app con pestañas:** `python herramientas/medir_memoria_pestanas.py C:\Proyectos\pdfs-reales` abre 20 PDFs, los cierra y repite 3 veces. Al cerrar todo tiene que volver a lo mismo en cada ronda, con 0 `Documento` y 0 `Pestana` vivos.

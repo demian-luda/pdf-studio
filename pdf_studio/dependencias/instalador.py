@@ -6,16 +6,14 @@ muestra antes nombre, origen de la descarga, licencia, tamaño y dónde se insta
 - Fuentes libres: solo para el usuario actual (sin administrador), en
   %LOCALAPPDATA%\\Microsoft\\Windows\\Fonts + registro en HKCU. Se avisa a Windows
   (AddFontResource + WM_FONTCHANGE), así quedan disponibles sin reiniciar.
-- Idiomas de OCR: a la carpeta de datos de la app, sin administrador.
-- Tesseract (winget) y Ghostscript (instalador oficial): Windows muestra su propio
-  aviso de permisos de administrador.
+- Tesseract y Ghostscript vienen incluidos; si faltan, se bajan por HTTPS a la carpeta
+  de la app, sin administrador (ver dependencias/programas.py).
 - Paquetes de Python: con el pip del .venv.
 """
 from __future__ import annotations
 
 import fnmatch
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -239,81 +237,6 @@ def instalacion_fuente(fuente) -> Instalacion:
     return Instalacion(f"fuente:{fuente.nombre}", f"Fuente «{fuente.nombre}»", fuente.origen, fuente.licencia,
                        f"Solo para tu usuario, sin permisos de administrador ({config.DIR_FUENTES_USUARIO})",
                        False, fuente.comando, lambda: tamano_fuente(fuente), accion)
-
-
-# ---------------------------------------------------------------------- Tesseract e idiomas
-API_TESSERACT = "https://api.github.com/repos/tesseract-ocr/tesseract/releases/latest"
-
-
-def _tamano_asset(api: str, patron: str) -> int | None:
-    datos = leer_json(api)
-    for a in datos.get("assets", []):
-        if fnmatch.fnmatch(a["name"], patron):
-            return a.get("size")
-    return None
-
-
-def instalacion_tesseract(id_winget: str, comando: str) -> Instalacion | None:
-    if shutil.which("winget") is None:
-        return None
-
-    def accion(progreso: Progreso) -> str:
-        progreso(0, 0, "Instalando Tesseract con winget (Windows puede pedir permiso)…")
-        r = subprocess.run(["winget", "install", "--id", id_winget, "-e", "--accept-source-agreements",
-                            "--accept-package-agreements"], capture_output=True, text=True,
-                           creationflags=SIN_VENTANA)
-        if r.returncode != 0:
-            raise ErrorInstalacion("winget no pudo instalar Tesseract:\n" + (r.stdout + r.stderr)[-800:])
-        return "Tesseract quedó instalado."
-
-    return Instalacion("programa:tesseract", "Tesseract OCR", f"winget ({id_winget}), desde github.com/tesseract-ocr",
-                       "Apache 2.0", "Para todo el equipo (Archivos de programa)", True, comando,
-                       lambda: _tamano_asset(API_TESSERACT, "*w64-setup*.exe"), accion)
-
-
-def instalacion_idiomas(url_plantilla: str, idiomas: tuple[str, ...], comando: str) -> Instalacion:
-    destino = config.DIR_TESSDATA_USUARIO
-    urls = [url_plantilla.format(idioma=i) for i in idiomas]
-
-    def tamano() -> int | None:
-        tamanos = [tamano_remoto(u) for u in urls]
-        return sum(tamanos) if all(t is not None for t in tamanos) else None
-
-    def accion(progreso: Progreso) -> str:
-        destino.mkdir(parents=True, exist_ok=True)
-        for i, url in zip(idiomas, urls):
-            temporal = destino / f"{i}.traineddata.descarga"
-            descargar(url, temporal, progreso, f"Descargando idioma «{i}»")
-            os.replace(temporal, destino / f"{i}.traineddata")
-        return "Los idiomas de OCR quedaron instalados."
-
-    return Instalacion("idioma:ocr", "Idiomas de OCR (" + ", ".join(idiomas) + ")", "github.com/tesseract-ocr/tessdata",
-                       "Apache 2.0", f"Solo para PDF Studio, sin administrador ({destino})", False, comando,
-                       tamano, accion)
-
-
-# ---------------------------------------------------------------------- Ghostscript
-def instalacion_ghostscript(api: str, comando: str) -> Instalacion:
-    def accion(progreso: Progreso) -> str:
-        datos = leer_json(api)
-        asset = next((a for a in datos.get("assets", []) if fnmatch.fnmatch(a["name"], "gs*w64.exe")), None)
-        if asset is None:
-            raise ErrorInstalacion("No se encontró el instalador de Ghostscript para Windows de 64 bits.")
-        with tempfile.TemporaryDirectory(prefix="pdfstudio_") as tmp:
-            exe = Path(tmp) / asset["name"]
-            descargar(asset["browser_download_url"], exe, progreso, "Descargando Ghostscript")
-            progreso(0, 0, "Instalando Ghostscript (Windows va a pedir permiso de administrador)…")
-            # -Verb RunAs: aparece el aviso de Windows para permisos de administrador
-            r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                                f"Start-Process -FilePath '{exe}' -Verb RunAs -Wait"],
-                               capture_output=True, text=True, creationflags=SIN_VENTANA)
-            if r.returncode != 0:
-                raise ErrorInstalacion("No se completó la instalación de Ghostscript:\n" + r.stderr[-600:])
-        return "Ghostscript quedó instalado."
-
-    return Instalacion("programa:ghostscript", "Ghostscript", "github.com/ArtifexSoftware/ghostpdl-downloads",
-                       "AGPL-3.0", "Para todo el equipo (Archivos de programa)", True, comando,
-                       lambda: _tamano_asset(api, "gs*w64.exe"), accion)
 
 
 # ---------------------------------------------------------------------- Python

@@ -6,11 +6,7 @@ una instalación asistida que la app ejecuta SOLO tras la confirmación del usua
 """
 from __future__ import annotations
 
-import glob
 import importlib.util
-import os
-import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -18,18 +14,10 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_studio import config
 from pdf_studio.core.fuentes import Embebido, IndiceFuentesSistema, InfoFuente, analizar_fuentes
-from pdf_studio.dependencias import instalador
+from pdf_studio.dependencias import instalador, programas
 from pdf_studio.dependencias.catalogo_fuentes import buscar_comercial, buscar_libre
 from pdf_studio.dependencias.instalador import Instalacion
-
-# IDs verificados con `winget search` / GitHub (octubre 2026)
-WINGET_TESSERACT = "tesseract-ocr.tesseract"
-URL_TESSDATA = "https://github.com/tesseract-ocr/tessdata/raw/main/{idioma}.traineddata"
-API_GHOSTSCRIPT = "https://api.github.com/repos/ArtifexSoftware/ghostpdl-downloads/releases/latest"
-IDIOMAS_OCR = ("spa", "eng")
-
 
 class Importancia(str, Enum):
     NECESARIO = "necesario"      # la app no funciona bien sin esto
@@ -111,122 +99,37 @@ def chequear_python(paquetes: list[PaquetePython] = PAQUETES) -> list[Faltante]:
     return faltan
 
 
-# ---------------------------------------------------------------------- Tesseract
+# ---------------------------------------------------------------------- Tesseract y Ghostscript
+# Vienen incluidos con la app (ver dependencias/programas.py): no se buscan en el sistema.
 def buscar_tesseract() -> Path | None:
-    encontrado = shutil.which("tesseract")
-    if encontrado:
-        return Path(encontrado)
-    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                 os.environ.get("LOCALAPPDATA", "")):
-        if base:
-            candidato = Path(base) / "Tesseract-OCR" / "tesseract.exe"
-            if candidato.is_file():
-                return candidato
-            candidato = Path(base) / "Programs" / "Tesseract-OCR" / "tesseract.exe"
-            if candidato.is_file():
-                return candidato
-    return None
+    return programas.ejecutable(programas.TESSERACT)
 
 
-def idiomas_tesseract(exe: Path, tessdata: Path | None = None) -> set[str]:
-    entorno = dict(os.environ)
-    if tessdata is not None:
-        entorno["TESSDATA_PREFIX"] = str(tessdata)
-    try:
-        r = subprocess.run([str(exe), "--list-langs"], capture_output=True, text=True,
-                           timeout=20, env=entorno,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    lineas = (r.stdout + "\n" + r.stderr).splitlines()
-    return {l.strip() for l in lineas if l.strip() and " " not in l.strip() and not l.endswith(":")}
+def buscar_ghostscript() -> Path | None:
+    return programas.ejecutable(programas.GHOSTSCRIPT)
 
 
-def tessdata_a_usar(exe: Path) -> Path | None:
-    """La carpeta de idiomas del usuario tiene prioridad si tiene español."""
-    if (config.DIR_TESSDATA_USUARIO / "spa.traineddata").is_file():
-        return config.DIR_TESSDATA_USUARIO
-    return None
-
-
-def comando_idiomas_ocr() -> str:
-    destino = config.DIR_TESSDATA_USUARIO
-    return "\n".join([
-        "# Descarga los idiomas español e inglés para el OCR (no requiere administrador)",
-        "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'",
-        f'$td = "{destino}"',
-        "New-Item -ItemType Directory -Force -Path $td | Out-Null",
-        "foreach ($l in 'spa', 'eng', 'osd') {",
-        f"  Invoke-WebRequest -Uri \"{URL_TESSDATA.format(idioma='$l')}\" -OutFile \"$td\\$l.traineddata\"",
-        "}",
-        "Write-Host 'Listo: idiomas instalados.'",
-    ])
-
-
-def comando_tesseract() -> str:
-    return (f"winget install --id {WINGET_TESSERACT} -e "
-            "--accept-source-agreements --accept-package-agreements")
+def _faltante_programa(programa: programas.Programa, importancia: Importancia) -> Faltante:
+    if getattr(sys, "frozen", False):
+        detalle = (f"Viene incluido con PDF Studio, pero no está en la carpeta de la app "
+                   f"(¿se borró «{programa.clave}»?). «Instalar» lo baja de nuevo, o reinstalá PDF Studio.")
+    else:
+        detalle = ("Desde el código no viene armado: «Instalar» lo baja (versión fija, verificada con SHA-256) "
+                   "sin administrador.")
+    return Faltante(f"programa:{programa.clave}", programa.titulo, programa.para_que, importancia,
+                    programas.comando_preparar(), detalle, programas.instalacion(programa))
 
 
 def chequear_tesseract() -> list[Faltante]:
-    exe = buscar_tesseract()
-    idiomas_inst = instalador.instalacion_idiomas(URL_TESSDATA, ("spa", "eng", "osd"), comando_idiomas_ocr())
-    if exe is None:
-        return [
-            Faltante("programa:tesseract", "Tesseract OCR",
-                     "Motor de OCR: reconoce el texto de PDFs escaneados.",
-                     Importancia.OPCIONAL, comando_tesseract(),
-                     "Después de instalarlo, instalá también los idiomas (ítem siguiente).",
-                     instalador.instalacion_tesseract(WINGET_TESSERACT, comando_tesseract())),
-            Faltante("idioma:ocr", "Idiomas español e inglés para OCR",
-                     "Tesseract necesita estos archivos para reconocer texto en español.",
-                     Importancia.OPCIONAL, comando_idiomas_ocr(), instalacion=idiomas_inst),
-        ]
-    idiomas = idiomas_tesseract(exe, tessdata_a_usar(exe))
-    faltan = [i for i in IDIOMAS_OCR if i not in idiomas]
-    if faltan:
-        return [Faltante("idioma:ocr", "Idiomas para OCR: " + ", ".join(faltan),
-                         "Tesseract está instalado pero le faltan idiomas para reconocer texto.",
-                         Importancia.OPCIONAL, comando_idiomas_ocr(), instalacion=idiomas_inst)]
-    return []
-
-
-# ---------------------------------------------------------------------- Ghostscript
-def buscar_ghostscript() -> Path | None:
-    for nombre in ("gswin64c", "gswin32c", "gs"):
-        encontrado = shutil.which(nombre)
-        if encontrado:
-            return Path(encontrado)
-    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
-        candidatos = sorted(glob.glob(str(Path(base) / "gs" / "gs*" / "bin" / "gswin*c.exe")))
-        if candidatos:
-            return Path(candidatos[-1])
-    return None
-
-
-def comando_ghostscript() -> str:
-    # Ghostscript no está en winget: se baja el instalador oficial de la última versión
-    return "\n".join([
-        "# Descarga e instala Ghostscript (versión oficial más reciente de Artifex).",
-        "# Windows va a pedir permiso de administrador durante la instalación.",
-        "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'",
-        f"$r = Invoke-RestMethod -Uri '{API_GHOSTSCRIPT}'",
-        "$a = $r.assets | Where-Object { $_.name -like 'gs*w64.exe' } | Select-Object -First 1",
-        '$exe = Join-Path $env:TEMP $a.name',
-        "Invoke-WebRequest -Uri $a.browser_download_url -OutFile $exe",
-        "Start-Process -FilePath $exe -Wait",
-    ])
+    if buscar_tesseract() is not None:
+        return []
+    return [_faltante_programa(programas.TESSERACT, Importancia.RECOMENDADO)]
 
 
 def chequear_ghostscript() -> list[Faltante]:
     if buscar_ghostscript() is not None:
         return []
-    return [Faltante("programa:ghostscript", "Ghostscript",
-                     "Permite la compresión agresiva de PDFs (opcional; sin él se usa la compresión normal).",
-                     Importancia.OPCIONAL, comando_ghostscript(),
-                     instalacion=instalador.instalacion_ghostscript(API_GHOSTSCRIPT, comando_ghostscript()))]
+    return [_faltante_programa(programas.GHOSTSCRIPT, Importancia.OPCIONAL)]
 
 
 # ---------------------------------------------------------------------- fuentes

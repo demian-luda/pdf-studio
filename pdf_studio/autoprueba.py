@@ -2,8 +2,9 @@
 
 Comprueba, sin mostrar ventanas, que el .exe tenga todo lo que necesita: los recursos
 (íconos, fuentes, diccionarios), abrir y guardar con la verificación de fidelidad, las
-tareas en otro proceso (--tarea), la instancia única, el corrector, Word (.docx), la firma digital, OpenCV y
-ocrmypdf. Escribe {prueba: "ok" | "omitida: …" | "error: …"} en el JSON y termina con 0 si todo anduvo.
+tareas en otro proceso (--tarea), la instancia única, el corrector, Word (.docx), la firma digital, OpenCV,
+ocrmypdf, un OCR real con el Tesseract incluido (español) y una compresión con el Ghostscript incluido.
+En el .exe (o con PDFSTUDIO_EXIGIR_PROGRAMAS=1) Tesseract y Ghostscript son obligatorios. Escribe {prueba: "ok" | "omitida: …" | "error: …"} en el JSON y termina con 0 si todo anduvo.
 No usa ningún archivo del usuario: todo se arma en una carpeta temporal.
 """
 from __future__ import annotations
@@ -187,17 +188,28 @@ def _ocrmypdf(tmp: Path) -> str:
     return "ok"
 
 
+def programas_obligatorios() -> bool:
+    """En el .exe Tesseract y Ghostscript vienen incluidos: si faltan, es un error, no una omisión."""
+    return getattr(sys, "frozen", False) or os.environ.get("PDFSTUDIO_EXIGIR_PROGRAMAS") == "1"
+
+
 def _ocr_real(tmp: Path) -> str:
-    """Un OCR de verdad (ocrmypdf con sus complementos y Tesseract), si Tesseract está instalado."""
+    """Un OCR de verdad con el Tesseract incluido: ocrmypdf (con sus complementos) y Tesseract
+    directo (TSV, como «A Word editable»), con texto en español."""
     import pymupdf
 
     from pdf_studio.core import conversion, ocr
+    from pdf_studio.dependencias import programas
     try:
-        conversion.herramientas_ocr()
-    except Exception:
-        return "omitida: Tesseract no está instalado"
+        exe, tessdata = conversion.herramientas_ocr()
+    except Exception as e:
+        if programas_obligatorios():
+            raise AssertionError(f"falta el Tesseract incluido: {e}") from e
+        return "omitida: Tesseract no está preparado (python -m pdf_studio.dependencias.programas)"
+    assert programas.carpeta(programas.TESSERACT) == exe.parent, "no se usa el Tesseract incluido"
     with pymupdf.open() as texto:
         texto.new_page().insert_text((72, 120), "PRUEBA DE RECONOCIMIENTO", fontsize=28)
+        texto[0].insert_text((72, 200), "Corazón, acción y señal", fontsize=28)
         pix = texto[0].get_pixmap(dpi=200)
     with pymupdf.open() as escaneo:
         pag = escaneo.new_page()
@@ -205,8 +217,29 @@ def _ocr_real(tmp: Path) -> str:
         capas = ocr.reconocer(escaneo, [0], tmp, timeout=300)
         assert capas, "el OCR no devolvió ninguna capa de texto"
         ocr.AgregarCapaOCR(capas).aplicar(escaneo)
-        leido = escaneo[0].get_text().upper()
-    assert "PRUEBA" in leido and "RECONOCIMIENTO" in leido, "el OCR no reconoció el texto de prueba"
+        leido = escaneo[0].get_text()
+    assert "PRUEBA" in leido.upper() and "RECONOCIMIENTO" in leido.upper(), "el OCR no reconoció el texto de prueba"
+    assert "Corazón" in leido and "señal" in leido, f"el OCR no reconoció el español: {leido!r}"
+    imagen = tmp / "pagina.png"
+    pix.save(imagen)
+    r = subprocess.run([str(exe), str(imagen), "stdout", "-l", "spa+eng"], capture_output=True, timeout=300,
+                       env={**os.environ, "TESSDATA_PREFIX": str(tessdata)},
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert r.returncode == 0 and "acción" in r.stdout.decode("utf-8", "replace"), "Tesseract directo falló"
+    return "ok"
+
+
+def _ghostscript(tmp: Path) -> str:
+    """Compresión máxima con el Ghostscript incluido."""
+    from pdf_studio.core import comprimir
+    from pdf_studio.dependencias import programas
+    if programas.ejecutable(programas.GHOSTSCRIPT) is None:
+        if programas_obligatorios():
+            raise AssertionError("falta el Ghostscript incluido")
+        return "omitida: Ghostscript no está preparado (python -m pdf_studio.dependencias.programas)"
+    salida = tmp / "comprimido.pdf"
+    comprimir.comprimir(_pdf(tmp / "original.pdf"), salida, comprimir.NivelCompresion.MAXIMO)
+    assert salida.stat().st_size > 0, "Ghostscript no generó el archivo"
     return "ok"
 
 
@@ -214,7 +247,8 @@ PRUEBAS = {"recursos": _recursos, "guardar con fidelidad": _guardar, "tarea en o
            "instancia única": _instancia_unica,
            "fuente variable": _fuente_variable,
            "corrector ortográfico": _ortografia, "Word (.docx)": _word, "firma digital": _firma,
-           "OpenCV": _opencv, "ocrmypdf": _ocrmypdf, "OCR con Tesseract": _ocr_real}
+           "OpenCV": _opencv, "ocrmypdf": _ocrmypdf, "OCR con Tesseract": _ocr_real,
+           "Ghostscript": _ghostscript}
 
 
 def main(destino: str) -> int:

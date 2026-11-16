@@ -2,6 +2,18 @@
 
 Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Cambiado
+
+- **Tesseract y Ghostscript vienen incluidos.** El OCR (Tesseract 5.5.3, con español e inglés en los
+  modelos más precisos, `tessdata_best`) y la compresión máxima (Ghostscript 10.08.0) funcionan desde el
+  primer arranque, sin instalar nada en Windows ni pedir permisos de administrador. La app usa siempre
+  los suyos, aunque haya otros instalados. Se arman desde los instaladores oficiales, con versión y
+  SHA-256 fijos, y sus licencias están en `LICENCIAS-TERCEROS.txt` y en cada carpeta.
+- **Sin winget.** Ni el panel *Faltantes* ni el instalador lo usan (en algunas PC no está). Si Tesseract
+  o Ghostscript faltaran, **Instalar** los baja por HTTPS, verificados, a la carpeta de la app.
+
 ## [0.3.1] - 2026-11-06
 
 ### Corregido

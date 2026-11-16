@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -63,6 +65,19 @@ def sin_dialogos_modales(monkeypatch):
     for nombre in ("information", "critical", "question", "warning"):
         monkeypatch.setattr(QMessageBox, nombre, staticmethod(prohibido))
     yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Con PDFSTUDIO_EXIGIR_PROGRAMAS=1 (en GitHub, donde se arman Tesseract y Ghostscript),
+    un test que se saltea porque faltan esos programas cuenta como falla: no se ocultan."""
+    resultado = yield
+    reporte = resultado.get_result()
+    if reporte.skipped and os.environ.get("PDFSTUDIO_EXIGIR_PROGRAMAS") == "1":
+        motivo = str(reporte.longrepr[-1] if isinstance(reporte.longrepr, tuple) else reporte.longrepr)
+        if re.search(r"Tesseract|Ghostscript", motivo, re.IGNORECASE):
+            reporte.outcome = "failed"
+            reporte.longrepr = f"Se exigía Tesseract/Ghostscript y el test se salteó: {motivo}"
 
 
 @pytest.hookimpl(hookwrapper=True)

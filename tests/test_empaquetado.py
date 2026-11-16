@@ -70,6 +70,32 @@ def test_licencias_de_terceros():
     assert "AGPL-3.0" in texto and all(f"- {p} " in paquetes for p in ("pymupdf", "pyside6", "spylls", "pyhanko"))
     assert "pyinstaller" not in texto.lower().split("recursos incluidos")[0]
     assert "Lucide" in texto and "RLA-ES" in texto
+    assert "Tesseract OCR 5." in texto and "tessdata_best" in texto and "Ghostscript 10." in texto
+    assert "LICENSE-tesseract.txt" in texto and "COPYING-ghostscript.txt" in texto
+    assert "winget" not in texto.lower()
+
+
+def test_cada_dll_de_tesseract_tiene_su_licencia():
+    """Si una versión nueva de Tesseract trae otra biblioteca, hay que registrar su licencia."""
+    from pdf_studio.dependencias import programas
+    empaquetar = pytest.importorskip("empaquetar")
+    carpeta = programas.carpeta_del_repo() / "tesseract"
+    if not carpeta.is_dir():
+        pytest.skip("Tesseract no está preparado (python -m pdf_studio.dependencias.programas)")
+    texto = "\n".join(empaquetar.programas_de_terceros())
+    assert "SIN LICENCIA REGISTRADA" not in texto, texto
+    assert all(p.name in texto for p in carpeta.glob("*.dll"))
+
+
+def test_copiar_programas_al_lado_del_exe(tmp_path):
+    from pdf_studio.dependencias import programas
+    empaquetar = pytest.importorskip("empaquetar")
+    if any(programas.carpeta(p) != programas.carpeta_del_repo() / p.clave for p in programas.PROGRAMAS):
+        pytest.skip("Tesseract y Ghostscript no están preparados (python -m pdf_studio.dependencias.programas)")
+    empaquetar.copiar_programas(tmp_path)
+    assert (tmp_path / "tesseract" / "tesseract.exe").is_file()
+    assert (tmp_path / "tesseract" / "tessdata" / "spa.traineddata").is_file()
+    assert (tmp_path / "ghostscript" / "gswin64c.exe").is_file()
 
 
 @pytest.mark.parametrize("nombre", ["instalar.ps1", "desinstalar.ps1"])
@@ -175,6 +201,9 @@ def test_workflow_de_release():
     usos = re.findall(r"uses:\s*([^\s]+)", texto)
     assert usos and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in usos), usos
     assert 'tags: ["v*"]' in texto and "windows-latest" in texto
+    # Tesseract y Ghostscript se arman (verificados) antes de las pruebas, que no los saltean
+    assert texto.index("python -m pdf_studio.dependencias.programas") < texto.index("python -m pytest")
+    assert 'PDFSTUDIO_EXIGIR_PROGRAMAS: "1"' in texto
     assert re.search(r'PYTHON_VERSION: "\d+\.\d+\.\d+"', texto) and "requirements-empaquetado.txt" in texto
     firma = texto[texto.index("Firmar con SignPath"):texto.index("Comprobar la firma")]
     assert "if: ${{ vars.SIGNPATH_HABILITADO == 'true' }}" in firma

@@ -246,8 +246,8 @@ def _comprimir_ghostscript(entrada: Path, salida: Path, contrasena: str | None, 
         from pdf_studio.dependencias.chequeo import buscar_ghostscript
         exe = buscar_ghostscript()
     if exe is None:
-        raise Limitacion("La compresión máxima necesita Ghostscript, que no está instalado. "
-                             "Instalalo desde el panel Faltantes o elegí otro nivel.")
+        raise Limitacion("La compresión máxima necesita el Ghostscript que viene con PDF Studio y no se "
+                         "encontró. Usá «Instalar» en el panel Faltantes o elegí otro nivel.")
     argumentos = [str(exe), "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.6", "-dPDFSETTINGS=/ebook",
                   "-dNOPAUSE", "-dBATCH", "-dQUIET", "-dSAFER", f"-sOutputFile={salida}"]
     if contrasena:

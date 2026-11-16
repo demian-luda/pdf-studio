@@ -42,11 +42,21 @@ jobs:
           python -m pip install --upgrade "pip==26.2.1"
           python -m pip install -r requirements.txt
 
+      - name: Tesseract (español e inglés) y Ghostscript incluidos
+        # Instaladores oficiales con versión y SHA-256 fijos (pdf_studio/dependencias/programas.py),
+        # abiertos con el 7-Zip oficial (también verificado) sin ejecutarlos. Quedan en programas/.
+        shell: pwsh
+        run: |
+          python -m pdf_studio.dependencias.programas --7zip-propio
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem programas -Recurse -File | Measure-Object -Sum Length | ForEach-Object { "programas/: {0:N1} MB" -f ($_.Sum / 1MB) }
+
       - name: Pruebas (con registro de memoria)
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
           PDFSTUDIO_MEMORIA: memoria.tsv
+          PDFSTUDIO_EXIGIR_PROGRAMAS: "1"   # los tests de OCR y Ghostscript no se saltean
           MARCADORES: ${{ inputs.marcadores }}
         run: |
           $m = if ($env:MARCADORES) { $env:MARCADORES } else { "not red" }

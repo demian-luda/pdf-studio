@@ -115,15 +115,37 @@ def test_formato_tamano():
 
 
 def test_faltantes_de_programas_tienen_instalacion(monkeypatch):
+    """Aunque no haya winget (Windows 10 sin la Tienda), «Instalar» funciona: baja por HTTPS."""
     from pdf_studio.dependencias import chequeo
     monkeypatch.setattr(chequeo, "buscar_tesseract", lambda: None)
     monkeypatch.setattr(chequeo, "buscar_ghostscript", lambda: None)
-    monkeypatch.setattr(instalador.shutil, "which", lambda n: "winget.exe" if n == "winget" else None)
+    monkeypatch.setattr(instalador.shutil, "which", lambda n: None)
     falt = {f.clave: f for f in chequeo.chequear_tesseract() + chequeo.chequear_ghostscript()}
-    assert falt["programa:tesseract"].instalacion.requiere_admin
-    assert not falt["idioma:ocr"].instalacion.requiere_admin
-    assert falt["programa:ghostscript"].instalacion.requiere_admin
-    assert all(f.comando for f in falt.values())          # siempre también el comando
+    assert set(falt) == {"programa:tesseract", "programa:ghostscript"}
+    for f in falt.values():
+        assert f.instalacion is not None and not f.instalacion.requiere_admin
+        assert "PDFStudio" in f.instalacion.destino and "SHA-256" in f.instalacion.origen
+        assert f.instalacion.tamano() > 1_000_000          # sin consultar la red: tamaños fijos
+        assert f.comando and "winget" not in f.comando.lower()
+
+
+def test_instalar_fuente_no_usa_programas_externos(tmp_path, monkeypatch):
+    """«Instalar fuente» es Python puro (HTTPS, registro de Windows y GDI): nada de winget ni
+    PowerShell, que podría faltar o estar bloqueado en un Windows 10 limpio."""
+    import subprocess
+
+    def prohibido(*a, **k):
+        raise AssertionError(f"Se intentó ejecutar un programa: {a}")
+    for nombre in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, nombre, prohibido)
+    zipf = tmp_path / "f.zip"
+    with zipfile.ZipFile(zipf, "w") as z:
+        z.writestr("ttf/DejaVuSans.ttf", TTF)
+    fuente = FuenteLibre("DejaVu Sans", "libre", "archivo", _url(zipf), ("DejaVuSans.ttf",))
+    registradas = []
+    monkeypatch.setattr(instalador, "registrar_fuente", registradas.append)
+    archivos = instalar_fuente(fuente, destino=tmp_path / "Fonts")
+    assert [a.name for a in archivos] == ["DejaVuSans.ttf"] and registradas == archivos
 
 
 # ---------------------------------------------------------------------- interfaz

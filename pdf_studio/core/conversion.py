@@ -57,8 +57,8 @@ def herramientas_ocr() -> tuple[Path, Path]:
     from pdf_studio.dependencias.chequeo import buscar_tesseract
     exe = buscar_tesseract()
     if exe is None:
-        raise LimitacionOCR("No se encontró Tesseract OCR, que hace falta para reconocer el texto. Instalalo "
-                            "desde el panel Faltantes (ahí está el comando de PowerShell listo para copiar).")
+        raise LimitacionOCR("No se encontró el Tesseract OCR que viene con PDF Studio, que hace falta para "
+                            "reconocer el texto. Usá «Instalar» en el panel Faltantes o reinstalá PDF Studio.")
     return exe, carpeta_tessdata(exe)
 
 
