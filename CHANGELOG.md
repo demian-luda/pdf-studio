@@ -2,7 +2,7 @@
 
 Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](https://semver.org/lang/es/).
 
-## [Sin publicar]
+## [0.4.0] - 2026-11-16
 
 ### Cambiado
 
@@ -13,6 +13,10 @@ Todos los cambios importantes de cada versión. Las versiones siguen [SemVer](ht
   SHA-256 fijos, y sus licencias están en `LICENCIAS-TERCEROS.txt` y en cada carpeta.
 - **Sin winget.** Ni el panel *Faltantes* ni el instalador lo usan (en algunas PC no está). Si Tesseract
   o Ghostscript faltaran, **Instalar** los baja por HTTPS, verificados, a la carpeta de la app.
+- **Licencias completas.** `LICENCIAS-TERCEROS.txt` y la carpeta `licencias` de cada programa traen el
+  texto completo de la licencia de Tesseract, de sus modelos de idioma, de cada una de las 33 bibliotecas
+  que usa, de Ghostscript y del runtime de Visual C++, bajados de la fuente oficial de cada proyecto.
+- El ZIP pesa más (unos 190 MB, antes 137 MB) porque trae Tesseract con sus idiomas y Ghostscript.
 
 ## [0.3.1] - 2026-11-06
 
