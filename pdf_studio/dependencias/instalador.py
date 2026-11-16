@@ -61,21 +61,46 @@ def tamano_remoto(url: str) -> int | None:
         return None
 
 
+REINTENTOS = 5                       # para respuestas pasajeras: 429 (demasiados pedidos) y 5xx
+ESPERA_INICIAL_S = 5.0
+
+
+def _espera(error: Exception, intento: int) -> float | None:
+    """Segundos a esperar antes de reintentar, o None si el error no es pasajero."""
+    import urllib.error
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code != 429 and error.code < 500:
+            return None
+        pedida = error.headers.get("Retry-After") if error.headers else None
+        if pedida and pedida.strip().isdigit():
+            return min(float(pedida), 120.0)
+    elif not isinstance(error, (TimeoutError, ConnectionError)) and "timed out" not in str(error):
+        return None
+    return ESPERA_INICIAL_S * 3 ** intento
+
+
 def descargar(url: str, destino: Path, progreso: Progreso = _sin_progreso, mensaje: str = "Descargando") -> Path:
-    try:
-        with _abrir(url) as r, open(destino, "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            hecho = 0
-            while True:
-                bloque = r.read(1 << 16)
-                if not bloque:
-                    break
-                f.write(bloque)
-                hecho += len(bloque)
-                progreso(hecho, total, mensaje)
-    except OSError as e:
-        destino.unlink(missing_ok=True)
-        raise ErrorInstalacion(f"No se pudo descargar {url}: {e}") from e
+    import time
+    for intento in range(REINTENTOS):
+        try:
+            with _abrir(url) as r, open(destino, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                hecho = 0
+                while True:
+                    bloque = r.read(1 << 16)
+                    if not bloque:
+                        break
+                    f.write(bloque)
+                    hecho += len(bloque)
+                    progreso(hecho, total, mensaje)
+            return destino
+        except OSError as e:
+            destino.unlink(missing_ok=True)
+            espera = _espera(e, intento)
+            if espera is None or intento == REINTENTOS - 1:
+                raise ErrorInstalacion(f"No se pudo descargar {url}: {e}") from e
+            progreso(0, 0, f"{mensaje}: el servidor está ocupado, se reintenta en {espera:.0f} s…")
+            time.sleep(espera)
     return destino
 
 

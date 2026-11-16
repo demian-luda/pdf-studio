@@ -255,3 +255,48 @@ def test_dialogo_texto_instala_y_actualiza(qtbot, tmp_path):
     dialogo.boton_instalar.click()
     assert dialogo.opcion_elegida().tipo == "sistema"
     assert dialogo.fila_instalar is None          # ya no hace falta instalar
+
+
+# ---------------------------------------------------------------------- reintentos
+def _error_http(codigo: int, retry_after: str | None = None):
+    import email.message
+    import urllib.error
+    cabeceras = email.message.Message()
+    if retry_after:
+        cabeceras["Retry-After"] = retry_after
+    return urllib.error.HTTPError("https://ejemplo/x", codigo, "error", cabeceras, None)
+
+
+def test_descarga_reintenta_si_el_servidor_esta_ocupado(tmp_path, monkeypatch):
+    """Un 429 (demasiados pedidos) o un 5xx se reintenta, respetando Retry-After."""
+    import time
+    respuestas = [_error_http(429, "7"), _error_http(502), io.BytesIO(b"datos")]
+    esperas = []
+
+    class Respuesta(io.BytesIO):
+        headers = {"Content-Length": "5"}
+
+    def abrir(url, metodo="GET"):
+        r = respuestas.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return Respuesta(r.getvalue())
+    monkeypatch.setattr(instalador, "_abrir", abrir)
+    monkeypatch.setattr(time, "sleep", esperas.append)
+    destino = instalador.descargar("https://ejemplo/x", tmp_path / "x")
+    assert destino.read_bytes() == b"datos"
+    assert esperas == [7.0, instalador.ESPERA_INICIAL_S * 3]
+
+
+def test_descarga_no_reintenta_un_404(tmp_path, monkeypatch):
+    import time
+    llamadas = []
+
+    def abrir(url, metodo="GET"):
+        llamadas.append(url)
+        raise _error_http(404)
+    monkeypatch.setattr(instalador, "_abrir", abrir)
+    monkeypatch.setattr(time, "sleep", lambda s: pytest.fail("no debía esperar"))
+    with pytest.raises(ErrorInstalacion, match="404"):
+        instalador.descargar("https://ejemplo/x", tmp_path / "x")
+    assert len(llamadas) == 1
