@@ -21,6 +21,7 @@ Resultado:
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata as metadata
 import json
 import shutil
@@ -66,34 +67,6 @@ PODAR = ["cv2/opencv_videoio_ffmpeg*.dll", "PySide6/opengl32sw.dll",
          "PySide6/plugins/imageformats/qpdf.dll", "PySide6/Qt6Pdf.dll",
          "PySide6/plugins/generic/qtuiotouchplugin.dll"]
 TRADUCCIONES = ("_es.qm", "_en.qm")       # de las de Qt, solo español e inglés
-
-# Bibliotecas que trae el instalador oficial de Tesseract para Windows (las que tesseract.exe
-# realmente usa) y su licencia. Si una versión nueva trae otra, la prueba de licencias lo avisa.
-LICENCIAS_DLL_TESSERACT = {
-    "libarchive": "libarchive: BSD-2-Clause", "libb2": "libb2 (BLAKE2): CC0-1.0",
-    "libbrotlicommon": "Brotli: MIT", "libbrotlidec": "Brotli: MIT", "libbz2": "bzip2: bzip2-1.0.6",
-    "libcurl": "curl: curl", "libdeflate": "libdeflate: MIT", "libexpat": "Expat: MIT",
-    "libgcc_s_seh": "GCC runtime: GPL-3.0-or-later WITH GCC-exception-3.1",
-    "libstdc++": "GCC runtime (libstdc++): GPL-3.0-or-later WITH GCC-exception-3.1",
-    "libgif": "giflib: MIT", "libiconv": "GNU libiconv: LGPL-2.1-or-later",
-    "libidn2": "libidn2: LGPL-3.0-or-later OR GPL-2.0-or-later", "libintl": "gettext (libintl): LGPL-2.1-or-later",
-    "libjbig": "JBIG-KIT: GPL-2.0-or-later", "libjpeg": "libjpeg-turbo: IJG AND BSD-3-Clause AND Zlib",
-    "libleptonica": "Leptonica: BSD-2-Clause", "liblerc": "LERC: Apache-2.0", "liblz4": "LZ4: BSD-2-Clause",
-    "liblzma": "XZ Utils (liblzma): 0BSD", "libopenjp2": "OpenJPEG: BSD-2-Clause", "libpng16": "libpng: Libpng-2.0",
-    "libpsl": "libpsl: MIT", "libsharpyuv": "libwebp: BSD-3-Clause", "libwebp": "libwebp: BSD-3-Clause",
-    "libwebpmux": "libwebp: BSD-3-Clause", "libssh2": "libssh2: BSD-3-Clause",
-    "libtesseract": "Tesseract: Apache-2.0", "libtiff": "LibTIFF: libtiff",
-    "libunistring": "GNU libunistring: LGPL-3.0-or-later OR GPL-2.0-or-later",
-    "libwinpthread": "mingw-w64 winpthreads: MIT AND BSD-3-Clause",
-    "libzstd": "Zstandard: BSD-3-Clause OR GPL-2.0-only", "zlib1": "zlib: Zlib",
-}
-
-
-def _base_dll(nombre: str) -> str:
-    """«libtiff-6.dll» → «libtiff»; «libstdc++-6.dll» → «libstdc++»."""
-    import re
-    return re.sub(r"(-[\d.]+)+$", "", nombre[:-4]) if nombre.lower().endswith(".dll") else nombre
-
 
 def programas_incluidos() -> Path:
     """Carpeta con Tesseract y Ghostscript ya armados y verificados (ver dependencias/programas.py)."""
@@ -195,10 +168,20 @@ def licencias_de_terceros() -> str:
 
 
 def programas_de_terceros(base: Path | None = None) -> list[str]:
-    """Sección de Tesseract y Ghostscript (en las carpetas tesseract y ghostscript, junto al .exe)."""
+    """Sección de Tesseract y Ghostscript (en las carpetas tesseract y ghostscript, junto al .exe),
+    con el texto completo de cada licencia al final."""
     from pdf_studio.dependencias import programas as pr
     base = base or pr.carpeta_del_repo()
     etiqueta_gs = pr.INSTALADOR_GHOSTSCRIPT.url.rsplit("/", 2)[-2]
+    textos: dict[str, tuple[str, list[str]]] = {}      # sha256 → (texto, de qué es)
+
+    def texto(ruta: Path, de: str) -> None:
+        if not ruta.is_file():
+            raise SystemExit(f"Falta el texto de licencia {ruta}: armá de nuevo los programas.")
+        datos = ruta.read_bytes()
+        clave = hashlib.sha256(datos).hexdigest()
+        textos.setdefault(clave, (datos.decode("utf-8", "replace"), []))[1].append(de)
+
     lineas = ["Programas incluidos (se ejecutan aparte; versión fija, descargados de su fuente oficial y "
               "verificados con SHA-256):",
               f"- Tesseract OCR {pr.TESSERACT_VERSION}: Apache-2.0. Texto: PDFStudio/tesseract/LICENSE-tesseract.txt. "
@@ -206,20 +189,32 @@ def programas_de_terceros(base: Path | None = None) -> list[str]:
               f"  Instalador: {pr.INSTALADOR_TESSERACT.url} (SHA-256 {pr.INSTALADOR_TESSERACT.sha256})",
               f"- Modelos de idioma {pr.TESSDATA_VERSION} (spa, eng): Apache-2.0. Texto: "
               "PDFStudio/tesseract/LICENSE-tessdata_best.txt. Fuente: https://github.com/tesseract-ocr/tessdata_best",
-              "- Bibliotecas que trae el instalador oficial de Tesseract para Windows (PDFStudio/tesseract/*.dll):"]
-    carpeta_t = base / "tesseract"
-    dlls = sorted(p.name for p in carpeta_t.glob("*.dll")) if carpeta_t.is_dir() else []
-    for nombre in dlls:
-        lineas.append(f"    {nombre}: {LICENCIAS_DLL_TESSERACT.get(_base_dll(nombre).lower(), 'SIN LICENCIA REGISTRADA')}")
-    if not dlls:
-        lineas.append("    (se listan al armar, con los programas preparados)")
+              "- Bibliotecas que trae el instalador oficial de Tesseract para Windows (PDFStudio/tesseract/*.dll). "
+              "Cada texto es del proyecto y la etiqueta indicados, bajado de su repositorio o sitio oficial:"]
+    carpeta_t, carpeta_g = base / "tesseract", base / "ghostscript"
+    if not carpeta_t.is_dir() or not carpeta_g.is_dir():
+        raise SystemExit("Faltan los programas armados: python -m pdf_studio.dependencias.programas")
+    texto(carpeta_t / "LICENSE-tesseract.txt", f"Tesseract OCR {pr.TESSERACT_VERSION}")
+    texto(carpeta_t / "LICENSE-tessdata_best.txt", pr.TESSDATA_VERSION)
+    for nombre_prog, carpeta in (("tesseract", carpeta_t), ("ghostscript", carpeta_g)):
+        for dll, lic in pr.licencias_de(carpeta):
+            rutas = [f"PDFStudio/{nombre_prog}/licencias/{lic.carpeta}/{t.destino}" for t in lic.textos]
+            if nombre_prog == "tesseract":
+                lineas.append(f"    {dll}: {lic.proyecto}, {lic.spdx}. Texto: {', '.join(rutas)}")
+            for t in lic.textos:
+                texto(carpeta / "licencias" / lic.carpeta / t.destino, f"{lic.proyecto} ({t.destino})")
+    texto(carpeta_g / "COPYING-ghostscript.txt", f"Ghostscript {pr.GHOSTSCRIPT_VERSION}")
     lineas += [f"- Ghostscript {pr.GHOSTSCRIPT_VERSION} (Artifex Software): AGPL-3.0. "
                "Texto: PDFStudio/ghostscript/COPYING-ghostscript.txt. "
                f"Fuente: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/tag/{etiqueta_gs}",
                f"  Instalador: {pr.INSTALADOR_GHOSTSCRIPT.url} (SHA-256 {pr.INSTALADOR_GHOSTSCRIPT.sha256})",
-               "- Runtime de Microsoft Visual C++ (" + ", ".join(pr.RUNTIME_MSVC) + ") en PDFStudio/ghostscript: "
-               "archivos redistribuibles de Microsoft, los mismos que trae PySide6.",
-               "", "Tesseract y Ghostscript se usan siempre desde estas carpetas: no se instala nada en Windows."]
+               "- Runtime de Microsoft Visual C++ (" + ", ".join(pr.RUNTIME_MSVC) + ") en PDFStudio/ghostscript, "
+               f"los mismos que trae PySide6: {pr.LICENCIA_MSVC.spdx}. Texto: "
+               f"PDFStudio/ghostscript/licencias/{pr.LICENCIA_MSVC.carpeta}/crtlicense.txt",
+               "", "Tesseract y Ghostscript se usan siempre desde estas carpetas: no se instala nada en Windows.",
+               "", "=" * 78, "TEXTOS COMPLETOS DE LAS LICENCIAS DE LOS PROGRAMAS INCLUIDOS", "=" * 78]
+    for _clave, (contenido, de) in textos.items():
+        lineas += ["", "-" * 78, "Para: " + "; ".join(de), "-" * 78, "", contenido.rstrip()]
     return lineas
 
 
@@ -323,7 +318,7 @@ def main(argv: list[str]) -> int:
         # Solo comprimir una carpeta ya armada (p. ej. la que devuelve SignPath con el .exe firmado)
         carpeta = Path(argv[argv.index("--zip-desde") + 1])
         zip_ = comprimir(carpeta)
-        print(f"ZIP: {zip_} ({zip_.stat().st_size / 1024 / 1024:.1f} MB)\n"
+        print(f"ZIP: {zip_} ({zip_.stat().st_size / 1024 / 1024:.1f} MB, {zip_.stat().st_size} bytes)\n"
               f"{sumas_sha256(zip_).read_text(encoding='utf-8')}")
         return 0
     programas_incluidos()            # antes de armar: si faltan, se avisa enseguida

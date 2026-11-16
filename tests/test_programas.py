@@ -18,9 +18,20 @@ ORIGENES_OFICIALES = ("https://github.com/tesseract-ocr/", "https://github.com/A
                       "https://github.com/ip7z/7zip/")
 
 
+ORIGENES_LICENCIAS = ORIGENES_OFICIALES + (
+    "https://raw.githubusercontent.com/", "https://gitlab.com/libidn/", "https://gitlab.com/libtiff/",
+    "https://gcc.gnu.org/git/", "https://sourceware.org/git/", "https://sourceforge.net/p/giflib/",
+    "https://ftp.gnu.org/gnu/", "https://www.cl.cam.ac.uk/~mgk25/jbigkit/")
+
+
 def _todas_las_descargas() -> list[programas.Archivo]:
     return [programas.INSTALADOR_TESSERACT, *programas.IDIOMAS.values(), programas.LICENCIA_TESSDATA,
             programas.INSTALADOR_GHOSTSCRIPT, programas.SIETE_ZIP_R, programas.SIETE_ZIP]
+
+
+def _textos_de_licencia() -> list[programas.Texto]:
+    licencias = [l for l in programas.LICENCIAS_DLL.values() if l is not None] + [programas.LICENCIA_MSVC]
+    return [t for l in licencias for t in l.textos]
 
 
 @pytest.mark.parametrize("archivo", _todas_las_descargas(), ids=lambda a: a.nombre)
@@ -28,6 +39,22 @@ def test_descargas_fijas_y_oficiales(archivo):
     assert archivo.url.startswith(ORIGENES_OFICIALES), archivo.url
     assert re.fullmatch(r"[0-9a-f]{64}", archivo.sha256) and archivo.tamano > 0
     assert "latest" not in archivo.url and "/main/" not in archivo.url      # versión fija, no «la última»
+
+
+@pytest.mark.parametrize("texto", _textos_de_licencia(), ids=lambda t: t.archivo.url.rsplit("/", 2)[-2] + "/" + t.destino)
+def test_textos_de_licencia_con_version_fija(texto):
+    a = texto.archivo
+    assert a.url.startswith(ORIGENES_LICENCIAS), a.url
+    assert re.fullmatch(r"[0-9a-f]{64}", a.sha256) and a.tamano > 0
+    assert "/main/" not in a.url and "/master/" not in a.url and "latest" not in a.url
+    if texto.miembro is not None:                       # de un tarball: se verifica también el texto
+        assert re.fullmatch(r"[0-9a-f]{64}", texto.sha256_miembro or "")
+
+
+def test_la_descarga_incluye_las_licencias():
+    assert programas.tamano_descarga(programas.TESSERACT) > programas.INSTALADOR_TESSERACT.tamano + 28_000_000
+    urls = {a.url for a in programas.TESSERACT.descargas()}
+    assert all(t.archivo.url in urls for l in programas.LICENCIAS_DLL.values() if l for t in l.textos)
 
 
 def test_idiomas_best_espanol_e_ingles():
@@ -83,7 +110,7 @@ def test_cache_verificada_no_vuelve_a_bajar(monkeypatch, tmp_path):
     datos = b"contenido"
     archivo = programas.Archivo("https://github.com/tesseract-ocr/x/y.bin", hashlib.sha256(datos).hexdigest(), 9)
     (tmp_path / "cache").mkdir()
-    (tmp_path / "cache" / "y.bin").write_bytes(datos)
+    (tmp_path / "cache" / archivo.sha256).write_bytes(datos)      # la caché guarda por huella
     monkeypatch.setattr(programas, "descargar", lambda *a, **k: pytest.fail("no debía descargar"))
     programas.bajar_verificado(archivo, tmp_path / "y.bin", cache=tmp_path / "cache")
     assert (tmp_path / "y.bin").read_bytes() == datos

@@ -72,19 +72,39 @@ def test_licencias_de_terceros():
     assert "Lucide" in texto and "RLA-ES" in texto
     assert "Tesseract OCR 5." in texto and "tessdata_best" in texto and "Ghostscript 10." in texto
     assert "LICENSE-tesseract.txt" in texto and "COPYING-ghostscript.txt" in texto
+    assert "TEXTOS COMPLETOS" in texto and "GNU AFFERO GENERAL PUBLIC LICENSE" in texto
     assert "winget" not in texto.lower()
 
 
-def test_cada_dll_de_tesseract_tiene_su_licencia():
-    """Si una versión nueva de Tesseract trae otra biblioteca, hay que registrar su licencia."""
+def test_cada_dll_incluida_tiene_el_texto_completo_de_su_licencia():
+    """Cada DLL de Tesseract y Ghostscript tiene el texto completo de su licencia (verificado por
+    SHA-256) en su carpeta, y ese texto está entero en LICENCIAS-TERCEROS.txt. Si una versión nueva
+    trae otra biblioteca, falla hasta registrar su licencia."""
+    import hashlib
+
     from pdf_studio.dependencias import programas
     empaquetar = pytest.importorskip("empaquetar")
-    carpeta = programas.carpeta_del_repo() / "tesseract"
-    if not carpeta.is_dir():
-        pytest.skip("Tesseract no está preparado (python -m pdf_studio.dependencias.programas)")
-    texto = "\n".join(empaquetar.programas_de_terceros())
-    assert "SIN LICENCIA REGISTRADA" not in texto, texto
-    assert all(p.name in texto for p in carpeta.glob("*.dll"))
+    base = programas.carpeta_del_repo()
+    if not all(programas.esta_completo(base / p.clave, p) for p in programas.PROGRAMAS):
+        pytest.skip("Tesseract y Ghostscript no están preparados (python -m pdf_studio.dependencias.programas)")
+    lista = empaquetar.licencias_de_terceros()
+    for p in programas.PROGRAMAS:
+        carpeta = base / p.clave
+        dlls = sorted(d.name for d in carpeta.glob("*.dll"))
+        cubiertas = {dll for dll, _lic in programas.licencias_de(carpeta)}     # KeyError: DLL sin registrar
+        sin_texto = set(dlls) - cubiertas - {"gsdll64.dll", "libtesseract-5.dll"}   # esas: su licencia propia
+        assert not sin_texto, sin_texto
+        for dll, lic in programas.licencias_de(carpeta):
+            assert dll in lista and lic.spdx in lista
+            for t in lic.textos:
+                ruta = carpeta / "licencias" / lic.carpeta / t.destino
+                datos = ruta.read_bytes()
+                assert hashlib.sha256(datos).hexdigest() == (t.sha256_miembro or t.archivo.sha256), ruta
+                assert len(datos) > 500, ruta
+                assert datos.decode("utf-8", "replace").rstrip() in lista, f"falta el texto completo de {ruta}"
+    for ruta in (base / "tesseract" / "LICENSE-tesseract.txt", base / "tesseract" / "LICENSE-tessdata_best.txt",
+                 base / "ghostscript" / "COPYING-ghostscript.txt"):
+        assert ruta.read_text(encoding="utf-8", errors="replace").rstrip() in lista, ruta
 
 
 def test_copiar_programas_al_lado_del_exe(tmp_path):
