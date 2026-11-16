@@ -210,7 +210,7 @@ def programas_de_terceros(base: Path | None = None) -> list[str]:
     carpeta_t = base / "tesseract"
     dlls = sorted(p.name for p in carpeta_t.glob("*.dll")) if carpeta_t.is_dir() else []
     for nombre in dlls:
-        lineas.append(f"    {nombre}: {LICENCIAS_DLL_TESSERACT.get(_base_dll(nombre), 'SIN LICENCIA REGISTRADA')}")
+        lineas.append(f"    {nombre}: {LICENCIAS_DLL_TESSERACT.get(_base_dll(nombre).lower(), 'SIN LICENCIA REGISTRADA')}")
     if not dlls:
         lineas.append("    (se listan al armar, con los programas preparados)")
     lineas += [f"- Ghostscript {pr.GHOSTSCRIPT_VERSION} (Artifex Software): AGPL-3.0. "
