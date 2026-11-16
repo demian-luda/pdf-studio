@@ -229,27 +229,31 @@ def test_sin_tesseract_mensaje_claro(monkeypatch):
         ocr.entorno_ocr()
 
 
-def test_idiomas_del_usuario_reciben_las_configuraciones(tmp_path, monkeypatch):
-    from pdf_studio import config
-    instalado = tmp_path / "Tesseract-OCR"
-    (instalado / "tessdata" / "configs").mkdir(parents=True)
-    (instalado / "tessdata" / "configs" / "hocr").write_text("tessedit_create_hocr 1")
-    (instalado / "tessdata" / "eng.traineddata").write_bytes(b"x")
-    usuario = tmp_path / "usuario"
-    usuario.mkdir()
+def test_idiomas_al_lado_del_tesseract_incluido(tmp_path):
+    (tmp_path / "tessdata").mkdir()
     for i in ("spa", "eng"):
-        (usuario / f"{i}.traineddata").write_bytes(b"x")
-    monkeypatch.setattr(config, "DIR_TESSDATA_USUARIO", usuario)
-    assert ocr.carpeta_tessdata(instalado / "tesseract.exe") == usuario
-    assert (usuario / "configs" / "hocr").is_file()
+        (tmp_path / "tessdata" / f"{i}.traineddata").write_bytes(b"x")
+    assert ocr.carpeta_tessdata(tmp_path / "tesseract.exe") == tmp_path / "tessdata"
 
 
-def test_faltan_idiomas(tmp_path, monkeypatch):
-    from pdf_studio import config
-    (tmp_path / "Tesseract-OCR" / "tessdata").mkdir(parents=True)
-    monkeypatch.setattr(config, "DIR_TESSDATA_USUARIO", tmp_path / "vacia")
+def test_faltan_idiomas(tmp_path):
+    (tmp_path / "tessdata").mkdir()
+    (tmp_path / "tessdata" / "eng.traineddata").write_bytes(b"x")
     with pytest.raises(ocr.ErrorOCR, match="spa"):
-        ocr.carpeta_tessdata(tmp_path / "Tesseract-OCR" / "tesseract.exe")
+        ocr.carpeta_tessdata(tmp_path / "tesseract.exe")
+
+
+def test_ocr_usa_el_tesseract_incluido_antes_que_el_del_sistema(tmp_path, monkeypatch):
+    from pdf_studio.dependencias import chequeo
+    incluido = tmp_path / "incluido"
+    (incluido / "tessdata").mkdir(parents=True)
+    for i in ("spa", "eng"):
+        (incluido / "tessdata" / f"{i}.traineddata").write_bytes(b"x")
+    monkeypatch.setattr(chequeo, "buscar_tesseract", lambda: incluido / "tesseract.exe")
+    monkeypatch.setenv("PATH", r"C:\Program Files\Tesseract-OCR")
+    entorno = ocr.entorno_ocr()
+    assert entorno["PATH"].split(";")[0] == str(incluido)
+    assert entorno["TESSDATA_PREFIX"] == str(incluido / "tessdata")
 
 
 def test_codigos_de_error_de_ocrmypdf():

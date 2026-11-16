@@ -17,10 +17,10 @@ def _carpeta_entorno(variable: str, respaldo: str) -> Path:
 DIR_APPDATA = _carpeta_entorno("APPDATA", "AppData/Roaming") / "PDFStudio"
 DIR_FIRMAS = DIR_APPDATA / "firmas"
 
-# Datos locales de la máquina (caché, idiomas de Tesseract)
+# Datos locales de la máquina (caché; Tesseract y Ghostscript bajados con «Instalar» si faltaban)
 DIR_LOCAL = _carpeta_entorno("LOCALAPPDATA", "AppData/Local") / "PDFStudio"
 DIR_CACHE = DIR_LOCAL / "cache"
-DIR_TESSDATA_USUARIO = DIR_LOCAL / "tessdata"
+DIR_PROGRAMAS = DIR_LOCAL / "programas"
 
 # Carpetas de fuentes de Windows: del sistema y del usuario actual
 DIR_FUENTES_WINDOWS = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"

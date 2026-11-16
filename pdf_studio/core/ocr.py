@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import io
 import os
-import shutil
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -25,7 +24,6 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_studio import config
 from pdf_studio.core.documento import ErrorDocumento, Limitacion, Operacion
 from pdf_studio.core.pdfutil import independizar_recursos
 
@@ -75,39 +73,25 @@ def parece_escaneado(doc: pymupdf.Document) -> bool:
 
 # ---------------------------------------------------------------------- entorno de Tesseract
 def carpeta_tessdata(exe: Path) -> Path:
-    """Carpeta de idiomas a usar. Si los idiomas están en la carpeta del usuario
-    (%LOCALAPPDATA%\\PDFStudio\\tessdata), se le copian las configuraciones de Tesseract
-    (archivos de texto chicos, p. ej. «hocr») que ocrmypdf necesita."""
-    instalada = exe.parent / "tessdata"
-    if all((instalada / f"{i}.traineddata").is_file() for i in IDIOMAS.split("+")):
-        return instalada
-    usuario = config.DIR_TESSDATA_USUARIO
-    if not all((usuario / f"{i}.traineddata").is_file() for i in IDIOMAS.split("+")):
-        faltan = [i for i in IDIOMAS.split("+")
-                  if not (usuario / f"{i}.traineddata").is_file() and not (instalada / f"{i}.traineddata").is_file()]
-        raise LimitacionOCR("Faltan los idiomas del OCR (" + ", ".join(faltan) + "). Instalalos desde el panel "
-                       "Faltantes (Ver → Ver faltantes).")
-    for nombre in ("configs", "tessconfigs"):
-        origen, destino = instalada / nombre, usuario / nombre
-        if origen.is_dir() and not destino.is_dir():
-            shutil.copytree(origen, destino)
-    for nombre in ("pdf.ttf", "osd.traineddata"):
-        origen, destino = instalada / nombre, usuario / nombre
-        if origen.is_file() and not destino.is_file():
-            shutil.copy2(origen, destino)
-    return usuario
+    """Carpeta de idiomas del Tesseract incluido con la app (al lado de tesseract.exe)."""
+    tessdata = exe.parent / "tessdata"
+    faltan = [i for i in IDIOMAS.split("+") if not (tessdata / f"{i}.traineddata").is_file()]
+    if faltan:
+        raise LimitacionOCR("Al Tesseract incluido le faltan los idiomas del OCR (" + ", ".join(faltan) + "). "
+                            "Reinstalá PDF Studio o usá «Instalar» en el panel Faltantes (Ver → Ver faltantes).")
+    return tessdata
 
 
 def entorno_ocr() -> dict[str, str]:
-    """Variables de entorno para ocrmypdf: Tesseract en el PATH y la carpeta de idiomas.
-    Lanza ErrorOCR con un mensaje claro si falta algo."""
+    """Variables de entorno para ocrmypdf: el Tesseract incluido primero en el PATH (así se usa
+    ese aunque haya otro instalado) y su carpeta de idiomas. Lanza ErrorOCR si falta algo."""
     from pdf_studio.dependencias.chequeo import buscar_tesseract, modulo_disponible
     if not modulo_disponible("ocrmypdf"):
         raise LimitacionOCR("Falta el paquete «ocrmypdf». Instalalo desde el panel Faltantes.")
     exe = buscar_tesseract()
     if exe is None:
-        raise LimitacionOCR("No se encontró Tesseract OCR. Instalalo desde el panel Faltantes "
-                       "(ahí está el comando de PowerShell listo para copiar).")
+        raise LimitacionOCR("No se encontró el Tesseract OCR que viene con PDF Studio. Usá «Instalar» en el "
+                            "panel Faltantes (lo baja sin administrador) o reinstalá PDF Studio.")
     tessdata = carpeta_tessdata(exe)
     entorno = dict(os.environ)
     entorno["PATH"] = str(exe.parent) + os.pathsep + entorno.get("PATH", "")

@@ -115,15 +115,37 @@ def test_formato_tamano():
 
 
 def test_faltantes_de_programas_tienen_instalacion(monkeypatch):
+    """Aunque no haya winget (Windows 10 sin la Tienda), «Instalar» funciona: baja por HTTPS."""
     from pdf_studio.dependencias import chequeo
     monkeypatch.setattr(chequeo, "buscar_tesseract", lambda: None)
     monkeypatch.setattr(chequeo, "buscar_ghostscript", lambda: None)
-    monkeypatch.setattr(instalador.shutil, "which", lambda n: "winget.exe" if n == "winget" else None)
+    monkeypatch.setattr(instalador.shutil, "which", lambda n: None)
     falt = {f.clave: f for f in chequeo.chequear_tesseract() + chequeo.chequear_ghostscript()}
-    assert falt["programa:tesseract"].instalacion.requiere_admin
-    assert not falt["idioma:ocr"].instalacion.requiere_admin
-    assert falt["programa:ghostscript"].instalacion.requiere_admin
-    assert all(f.comando for f in falt.values())          # siempre también el comando
+    assert set(falt) == {"programa:tesseract", "programa:ghostscript"}
+    for f in falt.values():
+        assert f.instalacion is not None and not f.instalacion.requiere_admin
+        assert "PDFStudio" in f.instalacion.destino and "SHA-256" in f.instalacion.origen
+        assert f.instalacion.tamano() > 1_000_000          # sin consultar la red: tamaños fijos
+        assert f.comando and "winget" not in f.comando.lower()
+
+
+def test_instalar_fuente_no_usa_programas_externos(tmp_path, monkeypatch):
+    """«Instalar fuente» es Python puro (HTTPS, registro de Windows y GDI): nada de winget ni
+    PowerShell, que podría faltar o estar bloqueado en un Windows 10 limpio."""
+    import subprocess
+
+    def prohibido(*a, **k):
+        raise AssertionError(f"Se intentó ejecutar un programa: {a}")
+    for nombre in ("run", "Popen", "call", "check_call", "check_output"):
+        monkeypatch.setattr(subprocess, nombre, prohibido)
+    zipf = tmp_path / "f.zip"
+    with zipfile.ZipFile(zipf, "w") as z:
+        z.writestr("ttf/DejaVuSans.ttf", TTF)
+    fuente = FuenteLibre("DejaVu Sans", "libre", "archivo", _url(zipf), ("DejaVuSans.ttf",))
+    registradas = []
+    monkeypatch.setattr(instalador, "registrar_fuente", registradas.append)
+    archivos = instalar_fuente(fuente, destino=tmp_path / "Fonts")
+    assert [a.name for a in archivos] == ["DejaVuSans.ttf"] and registradas == archivos
 
 
 # ---------------------------------------------------------------------- interfaz
@@ -233,3 +255,48 @@ def test_dialogo_texto_instala_y_actualiza(qtbot, tmp_path):
     dialogo.boton_instalar.click()
     assert dialogo.opcion_elegida().tipo == "sistema"
     assert dialogo.fila_instalar is None          # ya no hace falta instalar
+
+
+# ---------------------------------------------------------------------- reintentos
+def _error_http(codigo: int, retry_after: str | None = None):
+    import email.message
+    import urllib.error
+    cabeceras = email.message.Message()
+    if retry_after:
+        cabeceras["Retry-After"] = retry_after
+    return urllib.error.HTTPError("https://ejemplo/x", codigo, "error", cabeceras, None)
+
+
+def test_descarga_reintenta_si_el_servidor_esta_ocupado(tmp_path, monkeypatch):
+    """Un 429 (demasiados pedidos) o un 5xx se reintenta, respetando Retry-After."""
+    import time
+    respuestas = [_error_http(429, "7"), _error_http(502), io.BytesIO(b"datos")]
+    esperas = []
+
+    class Respuesta(io.BytesIO):
+        headers = {"Content-Length": "5"}
+
+    def abrir(url, metodo="GET"):
+        r = respuestas.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return Respuesta(r.getvalue())
+    monkeypatch.setattr(instalador, "_abrir", abrir)
+    monkeypatch.setattr(time, "sleep", esperas.append)
+    destino = instalador.descargar("https://ejemplo/x", tmp_path / "x")
+    assert destino.read_bytes() == b"datos"
+    assert esperas == [7.0, instalador.ESPERA_INICIAL_S * 3]
+
+
+def test_descarga_no_reintenta_un_404(tmp_path, monkeypatch):
+    import time
+    llamadas = []
+
+    def abrir(url, metodo="GET"):
+        llamadas.append(url)
+        raise _error_http(404)
+    monkeypatch.setattr(instalador, "_abrir", abrir)
+    monkeypatch.setattr(time, "sleep", lambda s: pytest.fail("no debía esperar"))
+    with pytest.raises(ErrorInstalacion, match="404"):
+        instalador.descargar("https://ejemplo/x", tmp_path / "x")
+    assert len(llamadas) == 1

@@ -223,12 +223,12 @@ def test_cerrar_con_cambios_y_cancelar(ventana, copia_pdf, monkeypatch):
 
 
 def test_panel_faltantes_y_copiar(ventana):
-    f = Faltante("x", "Programa X", "Sirve para probar.", Importancia.OPCIONAL, "winget install X")
+    f = Faltante("x", "Programa X", "Sirve para probar.", Importancia.OPCIONAL, "Instalar-X -Ahora")
     ventana.faltantes.set_generales([f])
     tarjetas = ventana.faltantes.tarjetas()
     assert len(tarjetas) == 1
     tarjetas[0].boton_copiar.click()
-    assert QGuiApplication.clipboard().text() == "winget install X"
+    assert QGuiApplication.clipboard().text() == "Instalar-X -Ahora"
     assert "1 elemento" in ventana.faltantes.resumen.text()
 
 

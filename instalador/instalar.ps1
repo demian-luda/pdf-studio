@@ -88,4 +88,4 @@ New-Item -Force "$registro\Classes\.pdf\OpenWithList\PDFStudio.exe" | Out-Null
 Write-Host ""
 Write-Host "Listo: PDF Studio quedó instalado." -ForegroundColor Green
 Write-Host "Abrilo desde el menú Inicio o el escritorio. Para desinstalarlo: Configuración > Aplicaciones > PDF Studio."
-Write-Host "Para el OCR hace falta Tesseract: la app lo detecta y ofrece instalarlo (panel Faltantes)."
+Write-Host "El OCR (Tesseract, con español e inglés) y la compresión máxima (Ghostscript) ya vienen incluidos."

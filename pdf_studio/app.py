@@ -29,6 +29,16 @@ def main(argv: list[str] | None = None) -> int:
         # Comprueba que la versión empaquetada tenga todo (ver pdf_studio/autoprueba.py)
         from pdf_studio.autoprueba import main as autoprueba
         return autoprueba(argv[2])
+    if len(argv) > 1 and argv[1] == "--instalar-programas":
+        # Equivalente del botón «Instalar» para copiar en PowerShell (versión empaquetada, sin
+        # consola): baja Tesseract y Ghostscript verificados y deja el resultado en un registro
+        import contextlib
+
+        from pdf_studio.dependencias import programas
+        registro = programas.archivo_de_registro()
+        registro.parent.mkdir(parents=True, exist_ok=True)
+        with open(registro, "w", encoding="utf-8") as f, contextlib.redirect_stdout(f):
+            return programas.main(argv[2:])
     if len(argv) > 1 and argv[1] == "--ocrmypdf":
         # Proceso auxiliar (versión empaquetada): ocrmypdf con los argumentos que siguen
         import multiprocessing

@@ -16,3 +16,5 @@ dist/
 *.pdf
 !tests/pdfs_prueba/*.pdf
 !tests/pdfs_prueba/fuentes/*.pdf
+# Tesseract y Ghostscript armados (python -m pdf_studio.dependencias.programas)
+/programas/

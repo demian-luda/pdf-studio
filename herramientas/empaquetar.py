@@ -3,6 +3,7 @@
 
 Uso (con el .venv):
     .\\.venv\\Scripts\\python.exe -m pip install -r requirements-empaquetado.txt
+    .\\.venv\\Scripts\\python.exe -m pdf_studio.dependencias.programas   # Tesseract y Ghostscript → programas\\
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py            # arma, prueba y comprime
     .\\.venv\\Scripts\\python.exe herramientas\\empaquetar.py --sin-zip  # solo la carpeta
     ... empaquetar.py --sin-ventana          # sin abrir la ventana del .exe (servidores de CI)
@@ -13,11 +14,14 @@ SOURCE_DATE_EPOCH el ZIP es reproducible. También se escribe dist\\SHA256SUMS.t
 
 Resultado:
     dist\\PDF Studio\\PDFStudio\\PDFStudio.exe   (la aplicación)
+    dist\\PDF Studio\\PDFStudio\\tesseract\\     (Tesseract incluido, con español e inglés)
+    dist\\PDF Studio\\PDFStudio\\ghostscript\\   (Ghostscript incluido)
     dist\\PDF Studio\\Instalar.cmd               (copia a %LOCALAPPDATA%\\Programs y crea accesos directos)
     dist\\PDFStudio-<versión>-windows.zip        (todo lo anterior, para compartir)
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata as metadata
 import json
 import shutil
@@ -63,6 +67,31 @@ PODAR = ["cv2/opencv_videoio_ffmpeg*.dll", "PySide6/opengl32sw.dll",
          "PySide6/plugins/imageformats/qpdf.dll", "PySide6/Qt6Pdf.dll",
          "PySide6/plugins/generic/qtuiotouchplugin.dll"]
 TRADUCCIONES = ("_es.qm", "_en.qm")       # de las de Qt, solo español e inglés
+
+def programas_incluidos() -> Path:
+    """Carpeta con Tesseract y Ghostscript ya armados y verificados (ver dependencias/programas.py)."""
+    from pdf_studio.dependencias import programas
+    base = programas.carpeta_del_repo()
+    for p in programas.PROGRAMAS:
+        if not programas.esta_completo(base / p.clave, p):
+            raise SystemExit(f"Falta {p.titulo} en {base / p.clave}. Armalo con:\n"
+                             f"  python -m pdf_studio.dependencias.programas")
+    return base
+
+
+def copiar_programas(carpeta: Path, base: Path | None = None) -> None:
+    """Copia Tesseract y Ghostscript al lado del .exe y verifica que no les falte ninguna DLL."""
+    from pdf_studio.dependencias import programas
+    base = base or programas_incluidos()
+    for p in programas.PROGRAMAS:
+        destino = carpeta / p.clave
+        if destino.exists():
+            shutil.rmtree(destino)
+        shutil.copytree(base / p.clave, destino)
+        archivos = [n for n in (p.ejecutable, "gsdll64.dll") if (destino / n).is_file()]
+        _usados, faltan = programas.dependencias(destino, archivos)
+        if faltan:
+            raise SystemExit(f"A {p.titulo} le faltan bibliotecas: {', '.join(sorted(faltan))}")
 
 
 def podar(carpeta: Path) -> int:
@@ -134,8 +163,59 @@ def licencias_de_terceros() -> str:
                "- Fuentes Liberation (SIL OFL 1.1), Carlito y Caladea (SIL OFL 1.1): pdf_studio/recursos/fuentes",
                "- Diccionarios es_AR (RLA-ES: GPL-3.0 / LGPL-3.0 / MPL-1.1) y en_US (SCOWL: MIT y BSD): "
                "pdf_studio/recursos/diccionarios",
-               "", "Tesseract y Ghostscript no vienen incluidos: la app ofrece instalarlos con winget."]
-    return "\n".join(lineas) + "\n"
+               ""]
+    return "\n".join(lineas + programas_de_terceros()) + "\n"
+
+
+def programas_de_terceros(base: Path | None = None) -> list[str]:
+    """Sección de Tesseract y Ghostscript (en las carpetas tesseract y ghostscript, junto al .exe),
+    con el texto completo de cada licencia al final."""
+    from pdf_studio.dependencias import programas as pr
+    base = base or pr.carpeta_del_repo()
+    etiqueta_gs = pr.INSTALADOR_GHOSTSCRIPT.url.rsplit("/", 2)[-2]
+    textos: dict[str, tuple[str, list[str]]] = {}      # sha256 → (texto, de qué es)
+
+    def texto(ruta: Path, de: str) -> None:
+        if not ruta.is_file():
+            raise SystemExit(f"Falta el texto de licencia {ruta}: armá de nuevo los programas.")
+        datos = ruta.read_bytes()
+        clave = hashlib.sha256(datos).hexdigest()
+        textos.setdefault(clave, (datos.decode("utf-8", "replace"), []))[1].append(de)
+
+    lineas = ["Programas incluidos (se ejecutan aparte; versión fija, descargados de su fuente oficial y "
+              "verificados con SHA-256):",
+              f"- Tesseract OCR {pr.TESSERACT_VERSION}: Apache-2.0. Texto: PDFStudio/tesseract/LICENSE-tesseract.txt. "
+              f"Fuente: https://github.com/tesseract-ocr/tesseract/tree/{pr.TESSERACT_VERSION}",
+              f"  Instalador: {pr.INSTALADOR_TESSERACT.url} (SHA-256 {pr.INSTALADOR_TESSERACT.sha256})",
+              f"- Modelos de idioma {pr.TESSDATA_VERSION} (spa, eng): Apache-2.0. Texto: "
+              "PDFStudio/tesseract/LICENSE-tessdata_best.txt. Fuente: https://github.com/tesseract-ocr/tessdata_best",
+              "- Bibliotecas que trae el instalador oficial de Tesseract para Windows (PDFStudio/tesseract/*.dll). "
+              "Cada texto es del proyecto y la etiqueta indicados, bajado de su repositorio o sitio oficial:"]
+    carpeta_t, carpeta_g = base / "tesseract", base / "ghostscript"
+    if not carpeta_t.is_dir() or not carpeta_g.is_dir():
+        raise SystemExit("Faltan los programas armados: python -m pdf_studio.dependencias.programas")
+    texto(carpeta_t / "LICENSE-tesseract.txt", f"Tesseract OCR {pr.TESSERACT_VERSION}")
+    texto(carpeta_t / "LICENSE-tessdata_best.txt", pr.TESSDATA_VERSION)
+    for nombre_prog, carpeta in (("tesseract", carpeta_t), ("ghostscript", carpeta_g)):
+        for dll, lic in pr.licencias_de(carpeta):
+            rutas = [f"PDFStudio/{nombre_prog}/licencias/{lic.carpeta}/{t.destino}" for t in lic.textos]
+            if nombre_prog == "tesseract":
+                lineas.append(f"    {dll}: {lic.proyecto}, {lic.spdx}. Texto: {', '.join(rutas)}")
+            for t in lic.textos:
+                texto(carpeta / "licencias" / lic.carpeta / t.destino, f"{lic.proyecto} ({t.destino})")
+    texto(carpeta_g / "COPYING-ghostscript.txt", f"Ghostscript {pr.GHOSTSCRIPT_VERSION}")
+    lineas += [f"- Ghostscript {pr.GHOSTSCRIPT_VERSION} (Artifex Software): AGPL-3.0. "
+               "Texto: PDFStudio/ghostscript/COPYING-ghostscript.txt. "
+               f"Fuente: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/tag/{etiqueta_gs}",
+               f"  Instalador: {pr.INSTALADOR_GHOSTSCRIPT.url} (SHA-256 {pr.INSTALADOR_GHOSTSCRIPT.sha256})",
+               "- Runtime de Microsoft Visual C++ (" + ", ".join(pr.RUNTIME_MSVC) + ") en PDFStudio/ghostscript, "
+               f"los mismos que trae PySide6: {pr.LICENCIA_MSVC.spdx}. Texto: "
+               f"PDFStudio/ghostscript/licencias/{pr.LICENCIA_MSVC.carpeta}/crtlicense.txt",
+               "", "Tesseract y Ghostscript se usan siempre desde estas carpetas: no se instala nada en Windows.",
+               "", "=" * 78, "TEXTOS COMPLETOS DE LAS LICENCIAS DE LOS PROGRAMAS INCLUIDOS", "=" * 78]
+    for _clave, (contenido, de) in textos.items():
+        lineas += ["", "-" * 78, "Para: " + "; ".join(de), "-" * 78, "", contenido.rstrip()]
+    return lineas
 
 
 def armar() -> Path:
@@ -148,6 +228,7 @@ def armar() -> Path:
     if not exe.is_file():
         raise SystemExit("PyInstaller no generó el .exe")
     print(f"Podado: {podar(carpeta) / 1024 / 1024:.0f} MB que la app no usa")
+    copiar_programas(carpeta)
     instalador = RAIZ / "instalador"
     for archivo in ("instalar.ps1", "desinstalar.ps1", "Instalar.cmd"):
         shutil.copy2(instalador / archivo, SALIDA / archivo)
@@ -237,8 +318,10 @@ def main(argv: list[str]) -> int:
         # Solo comprimir una carpeta ya armada (p. ej. la que devuelve SignPath con el .exe firmado)
         carpeta = Path(argv[argv.index("--zip-desde") + 1])
         zip_ = comprimir(carpeta)
-        print(f"ZIP: {zip_}\n{sumas_sha256(zip_).read_text(encoding='utf-8')}")
+        print(f"ZIP: {zip_} ({zip_.stat().st_size / 1024 / 1024:.1f} MB, {zip_.stat().st_size} bytes)\n"
+              f"{sumas_sha256(zip_).read_text(encoding='utf-8')}")
         return 0
+    programas_incluidos()            # antes de armar: si faltan, se avisa enseguida
     exe = armar()
     print(f"Listo: {exe} ({tamano(SALIDA)})")
     if "--sin-prueba" not in argv and not autoprueba(exe):

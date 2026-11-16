@@ -12,8 +12,8 @@ from pdf_studio import config
 from pdf_studio.core.fuentes import Embebido, FuenteSistema, IndiceFuentesSistema, InfoFuente
 from pdf_studio.dependencias import chequeo
 from pdf_studio.dependencias.catalogo_fuentes import buscar_comercial, buscar_libre, comando_liberation
+from pdf_studio.dependencias import programas
 from pdf_studio.dependencias.chequeo import (Importancia, PaquetePython, chequear_fuentes, chequear_python,
-                                             comando_ghostscript, comando_idiomas_ocr, comando_tesseract,
                                              faltante_de_fuente)
 from tests.conftest import DIR_PDFS
 
@@ -31,34 +31,30 @@ def test_paquetes_esenciales_instalados():
     assert chequear_python(esenciales) == []
 
 
-def test_comando_tesseract_usa_id_verificado():
-    assert "winget install --id tesseract-ocr.tesseract -e" in comando_tesseract()
-
-
-def test_comando_idiomas():
-    c = comando_idiomas_ocr()
-    assert "spa" in c and "eng" in c
-    assert str(config.DIR_TESSDATA_USUARIO) in c
-    assert "https://github.com/tesseract-ocr/tessdata/raw/main/$l.traineddata" in c
-
-
-def test_tesseract_ausente(monkeypatch):
+def test_tesseract_ausente_se_baja_sin_winget(monkeypatch):
     monkeypatch.setattr(chequeo, "buscar_tesseract", lambda: None)
     faltan = chequeo.chequear_tesseract()
-    assert [f.clave for f in faltan] == ["programa:tesseract", "idioma:ocr"]
+    assert [f.clave for f in faltan] == ["programa:tesseract"]          # los idiomas vienen con él
+    f = faltan[0]
+    assert f.instalacion is not None and not f.instalacion.requiere_admin
+    assert "winget" not in f.comando.lower() and "pdf_studio.dependencias.programas" in f.comando
 
 
-def test_tesseract_sin_espanol(monkeypatch, tmp_path):
-    monkeypatch.setattr(chequeo, "buscar_tesseract", lambda: tmp_path / "tesseract.exe")
-    monkeypatch.setattr(chequeo, "idiomas_tesseract", lambda exe, td=None: {"eng", "osd"})
-    faltan = chequeo.chequear_tesseract()
-    assert len(faltan) == 1 and "spa" in faltan[0].titulo
+def test_ghostscript_ausente_se_baja_sin_winget(monkeypatch):
+    monkeypatch.setattr(chequeo, "buscar_ghostscript", lambda: None)
+    f, = chequeo.chequear_ghostscript()
+    assert f.importancia == Importancia.OPCIONAL and not f.instalacion.requiere_admin
+    assert "winget" not in f.comando.lower()
 
 
-def test_comando_ghostscript():
-    c = comando_ghostscript()
-    assert "ArtifexSoftware/ghostpdl-downloads/releases/latest" in c
-    assert "gs*w64.exe" in c
+def test_con_los_programas_incluidos_no_falta_nada(monkeypatch, tmp_path):
+    for p in programas.PROGRAMAS:
+        for n in p.necesarios:
+            (tmp_path / p.clave / n).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / p.clave / n).write_bytes(b"x")
+    monkeypatch.setattr(programas, "carpetas_base", lambda: [tmp_path])
+    assert chequeo.chequear_tesseract() == [] and chequeo.chequear_ghostscript() == []
+    assert chequeo.buscar_tesseract() == tmp_path / "tesseract" / "tesseract.exe"
 
 
 def _fuente(nombre, embebido, instalada=False, incluida=False):
@@ -122,7 +118,7 @@ def test_chequeo_de_documento(tmp_path):
 def test_comandos_son_powershell_valido():
     """Parsea (sin ejecutar) cada comando generado con el parser oficial de PowerShell."""
     comandos = [
-        comando_tesseract(), comando_idiomas_ocr(), comando_ghostscript(), comando_liberation("Sans"),
+        programas.comando_preparar(), comando_liberation("Sans"),
         buscar_libre("Roboto-Bold").comando, chequeo.comando_pip("ocrmypdf"),
     ]
     for c in comandos:

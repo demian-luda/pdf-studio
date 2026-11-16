@@ -70,6 +70,52 @@ def test_licencias_de_terceros():
     assert "AGPL-3.0" in texto and all(f"- {p} " in paquetes for p in ("pymupdf", "pyside6", "spylls", "pyhanko"))
     assert "pyinstaller" not in texto.lower().split("recursos incluidos")[0]
     assert "Lucide" in texto and "RLA-ES" in texto
+    assert "Tesseract OCR 5." in texto and "tessdata_best" in texto and "Ghostscript 10." in texto
+    assert "LICENSE-tesseract.txt" in texto and "COPYING-ghostscript.txt" in texto
+    assert "TEXTOS COMPLETOS" in texto and "GNU AFFERO GENERAL PUBLIC LICENSE" in texto
+    assert "winget" not in texto.lower()
+
+
+def test_cada_dll_incluida_tiene_el_texto_completo_de_su_licencia():
+    """Cada DLL de Tesseract y Ghostscript tiene el texto completo de su licencia (verificado por
+    SHA-256) en su carpeta, y ese texto está entero en LICENCIAS-TERCEROS.txt. Si una versión nueva
+    trae otra biblioteca, falla hasta registrar su licencia."""
+    import hashlib
+
+    from pdf_studio.dependencias import programas
+    empaquetar = pytest.importorskip("empaquetar")
+    base = programas.carpeta_del_repo()
+    if not all(programas.esta_completo(base / p.clave, p) for p in programas.PROGRAMAS):
+        pytest.skip("Tesseract y Ghostscript no están preparados (python -m pdf_studio.dependencias.programas)")
+    lista = empaquetar.licencias_de_terceros()
+    for p in programas.PROGRAMAS:
+        carpeta = base / p.clave
+        dlls = sorted(d.name for d in carpeta.glob("*.dll"))
+        cubiertas = {dll for dll, _lic in programas.licencias_de(carpeta)}     # KeyError: DLL sin registrar
+        sin_texto = set(dlls) - cubiertas - {"gsdll64.dll", "libtesseract-5.dll"}   # esas: su licencia propia
+        assert not sin_texto, sin_texto
+        for dll, lic in programas.licencias_de(carpeta):
+            assert dll in lista and lic.spdx in lista
+            for t in lic.textos:
+                ruta = carpeta / "licencias" / lic.carpeta / t.destino
+                datos = ruta.read_bytes()
+                assert hashlib.sha256(datos).hexdigest() == (t.sha256_miembro or t.archivo.sha256), ruta
+                assert len(datos) > 500, ruta
+                assert datos.decode("utf-8", "replace").rstrip() in lista, f"falta el texto completo de {ruta}"
+    for ruta in (base / "tesseract" / "LICENSE-tesseract.txt", base / "tesseract" / "LICENSE-tessdata_best.txt",
+                 base / "ghostscript" / "COPYING-ghostscript.txt"):
+        assert ruta.read_text(encoding="utf-8", errors="replace").rstrip() in lista, ruta
+
+
+def test_copiar_programas_al_lado_del_exe(tmp_path):
+    from pdf_studio.dependencias import programas
+    empaquetar = pytest.importorskip("empaquetar")
+    if any(programas.carpeta(p) != programas.carpeta_del_repo() / p.clave for p in programas.PROGRAMAS):
+        pytest.skip("Tesseract y Ghostscript no están preparados (python -m pdf_studio.dependencias.programas)")
+    empaquetar.copiar_programas(tmp_path)
+    assert (tmp_path / "tesseract" / "tesseract.exe").is_file()
+    assert (tmp_path / "tesseract" / "tessdata" / "spa.traineddata").is_file()
+    assert (tmp_path / "ghostscript" / "gswin64c.exe").is_file()
 
 
 @pytest.mark.parametrize("nombre", ["instalar.ps1", "desinstalar.ps1"])
@@ -175,6 +221,9 @@ def test_workflow_de_release():
     usos = re.findall(r"uses:\s*([^\s]+)", texto)
     assert usos and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in usos), usos
     assert 'tags: ["v*"]' in texto and "windows-latest" in texto
+    # Tesseract y Ghostscript se arman (verificados) antes de las pruebas, que no los saltean
+    assert texto.index("python -m pdf_studio.dependencias.programas") < texto.index("python -m pytest")
+    assert 'PDFSTUDIO_EXIGIR_PROGRAMAS: "1"' in texto
     assert re.search(r'PYTHON_VERSION: "\d+\.\d+\.\d+"', texto) and "requirements-empaquetado.txt" in texto
     firma = texto[texto.index("Firmar con SignPath"):texto.index("Comprobar la firma")]
     assert "if: ${{ vars.SIGNPATH_HABILITADO == 'true' }}" in firma
